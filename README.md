@@ -130,8 +130,22 @@ HuggingFace is implemented. The other two are checked against their live APIs, n
 | Range response | `206` | **`200`** with `Content-Range` | `206` |
 | Default revision | `main` | `master` | a tag, e.g. `0.5b` |
 
-Kaggle Models answers `403` to an unauthenticated listing, so it needs API-key handling before an
-adapter is worth writing.
+### Which hubs this will actually ship
+
+Two, deliberately.
+
+| Hub | Status |
+|---|---|
+| HuggingFace | implemented |
+| ModelScope | planned — API verified live |
+| Ollama | deferred — adapter is straightforward, but its converted GGUFs share no hashes with the others, so it adds surface without compounding |
+| Modelers.cn | **documented, not implemented** — unreachable from where this was written, and an adapter whose only evidence is reading someone else's source is exactly what this project keeps proving to be insufficient |
+| Kaggle Models | no — `403` unauthenticated, needs API-key handling first |
+
+Two is the minimum that proves `ModelRepo` is load-bearing rather than decorative, and these two in
+particular are a hub and its mirror: they publish identical SHA-256 for identical content, so one can
+stand in for the other and be verified against the same expected hash. A third adapter would be a
+third adapter. That is not the same kind of gain.
 
 Revision belongs to the adapter, not the interface — the two hubs already disagree on its default,
 so a shared parameter would only push the difference up a layer.
