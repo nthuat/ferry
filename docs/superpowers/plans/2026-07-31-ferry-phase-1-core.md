@@ -991,6 +991,38 @@ class RepoDownloaderTest {
         assertTrue(seen.all { it.fileCount == 2 })
     }
 
+    /**
+     * MNN models already-present models as a source of their own. The equivalent here is cheaper:
+     * a repo already on disk and verifying is a hit, not a source. Re-fetching gigabytes the device
+     * already holds is the most expensive bug this class could have.
+     */
+    @Test
+    fun `an already downloaded and verified repo is not fetched again`() {
+        val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
+        server.enqueue(MockResponse().setBody(weightsBody))
+
+        val first = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+        val requestsAfterFirst = server.requestCount
+
+        val second = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+
+        assertEquals(first, second)
+        assertEquals("second call must not transfer bytes", requestsAfterFirst, server.requestCount)
+    }
+
+    /** A present-but-wrong file is not a hit. Corruption on disk must be re-fetched, not trusted. */
+    @Test
+    fun `a present repo failing verification is downloaded again`() {
+        val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
+        File(temp.root, "a--b").mkdirs()
+        File(temp.root, "a--b/model.bin").writeText("CORRUPTED")
+        server.enqueue(MockResponse().setBody(weightsBody))
+
+        val dir = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+
+        assertEquals(weightsBody, File(dir, "model.bin").readText())
+    }
+
     @Test
     fun `an http failure on one file fails the repo`() {
         val files = listOf(remote("model.bin", 100L))
@@ -1082,6 +1114,13 @@ class RepoDownloader(
         val staging = File(into, ".staging/$dirName")
         val target = File(into, dirName)
 
+        // Already here and still correct: the cheapest possible outcome, and the one a naive
+        // implementation misses by re-fetching gigabytes the device is already holding.
+        if (target.isDirectory && manifest.isSatisfiedBy(target)) {
+            onProgress(RepoProgress.Complete(repoId, target))
+            return@withContext Result.success(target)
+        }
+
         try {
             staging.mkdirs()
 
@@ -1136,6 +1175,20 @@ class RepoDownloader(
     }
 
     /**
+     * Whether [dir] already holds every file of this manifest, at the right size, with the right
+     * hash where one was published.
+     *
+     * Deliberately re-hashes rather than trusting a marker file: a marker records what was true
+     * once, and the point of the check is what is true now.
+     */
+    private fun RepoManifest.isSatisfiedBy(dir: File): Boolean = files.all { remote ->
+        val onDisk = File(dir, remote.path)
+        onDisk.isFile &&
+            onDisk.length() == remote.sizeBytes &&
+            (remote.sha256 == null || Sha256.matches(onDisk, remote.sha256))
+    }
+
+    /**
      * "Qwen/Qwen2.5-0.5B-Instruct" is one repository, not a directory called Qwen containing one
      * called Qwen2.5-0.5B-Instruct. Flattening keeps a repo id addressable as a single directory.
      */
@@ -1146,7 +1199,7 @@ class RepoDownloader(
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `./gradlew :ferry:testDebugUnitTest --tests "*RepoDownloaderTest*"`
-Expected: PASS, 11 tests.
+Expected: PASS, 13 tests.
 
 - [ ] **Step 5: Prove the guarantee tests can actually fail**
 
