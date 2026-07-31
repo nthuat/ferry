@@ -75,3 +75,5 @@ tasks.register("checkEmbeddable") {
         }
     }
 }
+
+tasks.named("check") { dependsOn("checkEmbeddable") }
