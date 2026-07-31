@@ -48,9 +48,16 @@ Not a feature list. Promises the implementation holds and the tests enforce.
 | 1 | **Never a partial model** | files land one by one and a loader picks up a half-written repo |
 | 2 | **Never a corrupt model** | trusting a `200`, or verifying against the wrong hash |
 | 3 | **Never starts what can't finish** | 4 GB model onto 3 GB free, failing at 91% |
-| 4 | **Always resumable** | progress kept in memory, or keyed to a version code |
+| 4 | **Resumable within one download attempt** | progress kept in memory, or keyed to a version code |
 
 Guarantee 3 is the one neither reference implementation has.
+
+Guarantee 4 is scoped, and the scope is the honest part. A dropped connection is recovered from
+mid-attempt via `Range`, and a file already on disk and verifying is not fetched again. Resume across
+process death is **not** implemented: the staging directory is deleted in a `finally` block so a
+failure can never leave a half-repo behind, which forfeits the partial files with it. A failed
+attempt therefore restarts from byte zero. Making both true at once needs persisted state and is a
+later phase.
 
 ## Two things about HuggingFace worth knowing
 
