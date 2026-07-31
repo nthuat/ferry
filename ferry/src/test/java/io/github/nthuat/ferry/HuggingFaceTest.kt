@@ -16,10 +16,17 @@ class HuggingFaceTest {
     private lateinit var server: MockWebServer
     private lateinit var repo: HuggingFace
 
-    /** Shaped exactly like the live response, including a field this code does not know about. */
+    /**
+     * Shaped exactly like the live response, including a field this code does not know about.
+     *
+     * A recursive listing carries both the directory entry and the files inside it, which is what
+     * makes the directory filter and the path assertions below mean something: a repo of 57 files
+     * across unet/, vae/ and onnx/ lists 10 without recursion.
+     */
     private val treeJson = """
         [
           { "type": "directory", "path": "onnx" },
+          { "type": "file", "path": "onnx/model.onnx", "size": 1234 },
           { "type": "file", "path": "config.json", "size": 659 },
           { "type": "file", "path": "model.safetensors", "size": 988097824,
             "oid": "d7db405a3f0d9bf1ba5bdd4e4211db8022ebe4eb",
@@ -46,7 +53,10 @@ class HuggingFaceTest {
 
         val manifest = runBlocking { repo.manifest("Qwen/Qwen2.5-0.5B-Instruct") }.getOrThrow()
 
-        assertEquals(listOf("config.json", "model.safetensors"), manifest.files.map { it.path })
+        assertEquals(
+            listOf("onnx/model.onnx", "config.json", "model.safetensors"),
+            manifest.files.map { it.path },
+        )
     }
 
     @Test
@@ -77,7 +87,7 @@ class HuggingFaceTest {
 
         val manifest = runBlocking { repo.manifest("Qwen/Qwen2.5-0.5B-Instruct") }.getOrThrow()
 
-        assertEquals(659L + 988097824L, manifest.totalBytes)
+        assertEquals(1234L + 659L + 988097824L, manifest.totalBytes)
     }
 
     /** xetHash is in the fixture and unknown to the parser. Strict parsing would throw here. */
@@ -106,16 +116,34 @@ class HuggingFaceTest {
         assertTrue(result.isFailure)
     }
 
+    /**
+     * The tree endpoint is non-recursive by default. Verified live against
+     * stabilityai/stable-diffusion-xl-base-1.0: 10 entries without `recursive=true`, 57 with it.
+     * Without it Ferry downloads the top level, commits, and reports a complete model.
+     */
     @Test
-    fun `manifest requests the tree endpoint`() {
+    fun `manifest requests the tree endpoint recursively`() {
         server.enqueue(MockResponse().setBody(treeJson))
 
         runBlocking { repo.manifest("Qwen/Qwen2.5-0.5B-Instruct") }
 
         assertEquals(
-            "/api/models/Qwen/Qwen2.5-0.5B-Instruct/tree/main",
+            "/api/models/Qwen/Qwen2.5-0.5B-Instruct/tree/main?recursive=true",
             server.takeRequest().path,
         )
+    }
+
+    /**
+     * The repo id is interpolated into a URL that carries a query string, so a delimiter inside it
+     * could reshape the request rather than name a repo — "a/b?recursive=false" would turn recursion
+     * off again. Refused before any request is made.
+     */
+    @Test
+    fun `a repo id containing a url delimiter is a failure and makes no request`() {
+        val result = runBlocking { repo.manifest("owner/model?recursive=false") }
+
+        assertTrue(result.isFailure)
+        assertEquals(0, server.requestCount)
     }
 
     @Test

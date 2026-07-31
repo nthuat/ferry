@@ -23,8 +23,23 @@ class HuggingFace(
 ) : ModelRepo {
 
     override suspend fun manifest(repoId: String): Result<RepoManifest> = withContext(dispatcher) {
+        // repoId is interpolated into a URL that now carries a query string, so a repoId containing
+        // a URL delimiter could reshape the request — "a/b?recursive=false#" would silently turn
+        // recursion back off and truncate the repo again. Refused rather than encoded: a repo id is
+        // an owner and a name, and none of these three characters belongs in either.
+        if (repoId.any { it in URL_DELIMITERS }) {
+            return@withContext Result.failure(
+                IOException("repo id must not contain '?', '&' or '#': $repoId"),
+            )
+        }
         try {
-            val request = Request.Builder().url("$baseUrl/api/models/$repoId/tree/main").build()
+            // recursive=true is not optional. The tree endpoint lists one level by default, so a
+            // repo with unet/, vae/ or onnx/ subtrees would list a fraction of its files, download
+            // that fraction, and report a complete model — with totalBytes short by the difference,
+            // which also makes the free-space precheck under-reserve.
+            val request = Request.Builder()
+                .url("$baseUrl/api/models/$repoId/tree/main?recursive=true")
+                .build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     return@withContext Result.failure(
@@ -72,6 +87,9 @@ class HuggingFace(
     )
 
     private companion object {
+        /** Characters that would end the path segment and start a query or fragment. */
+        const val URL_DELIMITERS = "?&#"
+
         /**
          * ignoreUnknownKeys is load-bearing, not hygiene. HuggingFace adds fields to this response
          * without notice — `xetHash` is a recent one — and strict parsing would turn that into a
