@@ -101,6 +101,47 @@ class ResumableDownloaderTest {
         assertEquals(20, target().length())
     }
 
+    /**
+     * ModelScope honours a Range request and answers 200 with a valid Content-Range instead of 206.
+     * Reading only the status code makes resume impossible against that hub: every attempt restarts,
+     * writes the tail at offset zero, and fails the length check forever.
+     */
+    @Test
+    fun `a 200 carrying a matching Content-Range is a continuation, not a restart`() {
+        partFile().writeText(fullBody.take(8))
+        File(temp.root, "asset.bin.validator").writeText("\"v1\"")
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(fullBody.drop(8))
+                .addHeader("Content-Range", "bytes 8-19/20"),
+        )
+
+        val result = download()
+
+        assertTrue(result.isSuccess)
+        assertEquals(fullBody, target().readText())
+    }
+
+    /** A whole body offered while we asked for a tail must still restart, code notwithstanding. */
+    @Test
+    fun `a 200 whose Content-Range starts at zero still restarts`() {
+        partFile().writeText("STALE---")
+        File(temp.root, "asset.bin.validator").writeText("\"v1\"")
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(fullBody)
+                .addHeader("Content-Range", "bytes 0-19/20"),
+        )
+
+        val result = download()
+
+        assertTrue(result.isSuccess)
+        assertEquals(fullBody, target().readText())
+        assertEquals(20, target().length())
+    }
+
     /** Same path, reached the other way: If-Range fails because the resource changed. */
     @Test
     fun `a changed validator restarts cleanly`() {

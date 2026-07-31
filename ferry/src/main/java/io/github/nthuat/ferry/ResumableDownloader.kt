@@ -67,7 +67,7 @@ class ResumableDownloader(
                 // sent the whole file instead — either it ignores Range, or If-Range failed
                 // because the file changed. Appending here splices two different files together
                 // and produces a plausible-sized, permanently corrupt result.
-                val append = response.code == HTTP_PARTIAL_CONTENT
+                val append = response.continuesFrom(resumeFrom)
                 val startFrom = if (append) resumeFrom else 0L
 
                 response.validator()?.let { validatorFile.writeText(it) }
@@ -165,6 +165,32 @@ class ResumableDownloader(
     /** ETag is the strong validator; Last-Modified is the fallback for servers that omit it. */
     private fun Response.validator(): String? =
         header("ETag") ?: header("Last-Modified")
+
+    /**
+     * Whether this response continues from [resumeFrom], or restarts the file.
+     *
+     * The status code alone is not enough to decide. ModelScope honours a Range request correctly
+     * and still answers `200 OK` rather than `206`, carrying a valid `Content-Range`. Reading only
+     * the code there makes resume impossible against that hub: every attempt is treated as a
+     * restart, writes the tail at offset zero, and fails the length check forever.
+     *
+     * Content-Range's start offset is the signal that actually distinguishes the cases. A server
+     * that ignored the Range header sends no Content-Range at all, and one that answered with the
+     * whole body reports a start of 0, which cannot match a non-zero resume point. So this stays
+     * strict about the case that corrupts files while accepting the one that is merely
+     * non-compliant.
+     */
+    private fun Response.continuesFrom(resumeFrom: Long): Boolean {
+        if (code == HTTP_PARTIAL_CONTENT) return true
+        if (resumeFrom <= 0L) return false
+        val start = header("Content-Range")
+            ?.substringAfter("bytes ")
+            ?.substringBefore('-')
+            ?.trim()
+            ?.toLongOrNull()
+            ?: return false
+        return start == resumeFrom
+    }
 
     private companion object {
         const val HTTP_PARTIAL_CONTENT = 206
