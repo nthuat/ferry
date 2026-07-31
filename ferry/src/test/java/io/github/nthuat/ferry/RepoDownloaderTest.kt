@@ -320,6 +320,59 @@ class RepoDownloaderTest {
         assertEquals("must not spend the user's data before validating the path", 0, server.requestCount)
     }
 
+    /**
+     * Downloads a real repo, then calls download again with [badRepoId], and asserts the already
+     * committed repo is still readable afterwards.
+     *
+     * The Result is not the evidence here and never was: the destructive version of this bug
+     * returned a perfectly ordinary Result.failure — because the staging directory it had just
+     * deleted could no longer be renamed — after `into.deleteRecursively()` had already taken
+     * every downloaded model with it. Only the filesystem can tell the two apart.
+     */
+    private fun assertCannotDestroyCommittedRepos(badRepoId: String) {
+        val good = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(configBody))
+        val committed =
+            runBlocking { downloaderFor(good).download("owner/model", temp.root) }.getOrThrow()
+
+        // Enqueued so an unguarded implementation completes its write rather than stalling on an
+        // empty queue — otherwise this test could pass on a network timeout instead of the guard.
+        val evil = listOf(remote("evil.bin", weightsBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(weightsBody))
+
+        val result = runBlocking { downloaderFor(evil).download(badRepoId, temp.root) }
+
+        assertTrue("'$badRepoId' must not be accepted as a repo id", result.isFailure)
+        assertEquals(
+            "an already committed repo must survive a repo id of '$badRepoId'",
+            configBody,
+            File(committed, "config.json").readText(),
+        )
+    }
+
+    /**
+     * An empty repo id is not exotic — it is a search field submitted blank, or a null coalesced
+     * to "". File(parent, "") is exactly parent, so a containment check that permits equality
+     * makes `target` the download root itself, and the commit step then deletes every repo the
+     * user has ever downloaded on its way to a failure that reads like a no-op.
+     */
+    @Test
+    fun `an empty repo id fails without destroying the repos already downloaded`() {
+        assertCannotDestroyCommittedRepos("")
+    }
+
+    /** File(parent, ".") canonicalizes to parent too, reaching the same place by a second route. */
+    @Test
+    fun `a repo id of a single dot fails without destroying the repos already downloaded`() {
+        assertCannotDestroyCommittedRepos(".")
+    }
+
+    /** And so does any id whose ".." segments cancel out, which needs no leading "..". */
+    @Test
+    fun `a repo id that cancels back to the download root fails without destroying it`() {
+        assertCannotDestroyCommittedRepos("owner/..")
+    }
+
     @Test
     fun `an http failure on one file fails the repo`() {
         val files = listOf(remote("model.bin", 100L))

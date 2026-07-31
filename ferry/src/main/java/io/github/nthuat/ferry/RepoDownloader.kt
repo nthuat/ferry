@@ -180,13 +180,20 @@ class RepoDownloader(
      * network, so neither can be trusted to stay inside the directory it is joined to. Canonical
      * paths are compared rather than the raw strings so that "..", symlinks, and redundant
      * separators are all resolved before the comparison rather than pattern-matched.
+     *
+     * Strictly inside: resolving to [parent] itself is rejected, not tolerated as a base case.
+     * File(parent, "") and File(parent, ".") are both exactly parent, so permitting equality made
+     * an empty repo id — a blank search field, a null coalesced to "" — resolve `target` onto the
+     * download root, whose commit step then deleteRecursively()s every repo the user had. None of
+     * the four callers wants the parent: a repo never stages as the whole staging area, a target
+     * is never the download root, and a file is never the directory containing it.
      */
     private fun resolveInside(parent: File, relative: String): File {
         val candidate = File(parent, relative)
         val root = parent.canonicalPath
         val resolved = candidate.canonicalPath
-        if (resolved != root && !resolved.startsWith(root + File.separator)) {
-            throw IOException("path escapes $parent: $relative")
+        if (resolved == root || !resolved.startsWith(root + File.separator)) {
+            throw IOException("path must resolve strictly inside $parent: $relative")
         }
         return candidate
     }
