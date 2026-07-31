@@ -75,15 +75,19 @@ class RepoDownloaderTest {
         assertEquals(weightsBody, File(dir, "model.bin").readText())
     }
 
+    /** "a/b" flattened to "a--b" would collide with a repo literally named "a--b"; nesting can't. */
     @Test
-    fun `a repo id containing a slash becomes one directory, not two`() {
-        val files = listOf(remote("config.json", configBody.length.toLong()))
+    fun `repo ids that would collide when flattened resolve to separate directories`() {
+        val filesA = listOf(remote("config.json", configBody.length.toLong()))
+        val filesB = listOf(remote("model.bin", weightsBody.length.toLong()))
         server.enqueue(MockResponse().setBody(configBody))
+        server.enqueue(MockResponse().setBody(weightsBody))
 
-        val dir = runBlocking { downloaderFor(files).download("Qwen/Q-0.5B", temp.root) }.getOrThrow()
+        val dirA = runBlocking { downloaderFor(filesA).download("a/b", temp.root) }.getOrThrow()
+        val dirB = runBlocking { downloaderFor(filesB).download("a--b", temp.root) }.getOrThrow()
 
-        assertFalse("repo id must be flattened", dir.path.contains("Qwen/Q-0.5B"))
-        assertTrue(dir.isDirectory)
+        assertEquals(configBody, File(dirA, "config.json").readText())
+        assertEquals(weightsBody, File(dirB, "model.bin").readText())
     }
 
     @Test
@@ -139,7 +143,7 @@ class RepoDownloaderTest {
 
         runBlocking { downloaderFor(files).download("a/b", temp.root) }
 
-        val committed = File(temp.root, "a--b")
+        val committed = File(temp.root, "a/b")
         assertFalse("a half-verified repo must not be readable", committed.exists())
     }
 
@@ -206,13 +210,31 @@ class RepoDownloaderTest {
     @Test
     fun `a present repo failing verification is downloaded again`() {
         val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
-        File(temp.root, "a--b").mkdirs()
-        File(temp.root, "a--b/model.bin").writeText("CORRUPTED")
+        File(temp.root, "a/b").mkdirs()
+        File(temp.root, "a/b/model.bin").writeText("CORRUPTED")
         server.enqueue(MockResponse().setBody(weightsBody))
 
         val dir = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
 
         assertEquals(weightsBody, File(dir, "model.bin").readText())
+    }
+
+    /**
+     * Same shape as a bug fixed in Task 1 (an invalid baseUrl thrown instead of returned): the
+     * cache-hit check re-hashes an existing file, which is I/O and can fail for reasons unrelated
+     * to whether the file is correct. That failure must become Result.failure, not escape download().
+     */
+    @Test
+    fun `a cache-hit check that cannot read a file fails instead of throwing`() {
+        val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
+        val existing = File(temp.root, "a/b/model.bin")
+        existing.parentFile?.mkdirs()
+        existing.writeText(weightsBody)
+        existing.setReadable(false)
+
+        val result = runBlocking { downloaderFor(files).download("a/b", temp.root) }
+
+        assertTrue(result.isFailure)
     }
 
     @Test

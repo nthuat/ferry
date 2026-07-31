@@ -63,18 +63,23 @@ class RepoDownloader(
             return@withContext Result.failure(InsufficientSpaceException(report))
         }
 
-        val dirName = flatten(repoId)
-        val staging = File(into, ".staging/$dirName")
-        val target = File(into, dirName)
-
-        // Already here and still correct: the cheapest possible outcome, and the one a naive
-        // implementation misses by re-fetching gigabytes the device is already holding.
-        if (target.isDirectory && manifest.isSatisfiedBy(target)) {
-            onProgress(RepoProgress.Complete(repoId, target))
-            return@withContext Result.success(target)
-        }
+        // repoId is used as a relative path rather than flattened into one directory name, so two
+        // distinct ids (e.g. "a/b" and "a--b") can never collide onto the same directory.
+        val staging = File(into, ".staging/$repoId")
+        val target = File(into, repoId)
 
         try {
+            // Already here and still correct: the cheapest possible outcome, and the one a naive
+            // implementation misses by re-fetching gigabytes the device is already holding.
+            //
+            // Inside the try: isSatisfiedBy re-hashes existing files, which is I/O and can throw
+            // the same way every other read in this method can, and must become Result.failure
+            // rather than escape the public boundary.
+            if (target.isDirectory && manifest.isSatisfiedBy(target)) {
+                onProgress(RepoProgress.Complete(repoId, target))
+                return@withContext Result.success(target)
+            }
+
             staging.mkdirs()
 
             manifest.files.forEachIndexed { index, remote ->
@@ -140,10 +145,4 @@ class RepoDownloader(
             onDisk.length() == remote.sizeBytes &&
             (remote.sha256 == null || Sha256.matches(onDisk, remote.sha256))
     }
-
-    /**
-     * "Qwen/Qwen2.5-0.5B-Instruct" is one repository, not a directory called Qwen containing one
-     * called Qwen2.5-0.5B-Instruct. Flattening keeps a repo id addressable as a single directory.
-     */
-    private fun flatten(repoId: String): String = repoId.replace("/", "--")
 }
