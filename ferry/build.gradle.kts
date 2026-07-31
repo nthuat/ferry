@@ -34,8 +34,14 @@ kotlin {
 }
 
 dependencies {
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // api, not implementation: OkHttpClient is in the signature of Ferry.huggingFace, HuggingFace
+    // and ResumableDownloader, and CoroutineDispatcher in three constructors. On implementation
+    // those types are absent from a consumer's compile classpath, so the host could not pass its own
+    // client — which is the property EmbeddabilityTest exists to guarantee, and which that test
+    // cannot observe because it compiles inside this module.
+    api("com.squareup.okhttp3:okhttp:4.12.0")
+    api("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // Stays implementation: serialization appears in no public signature, only inside HuggingFace.
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
     testImplementation("junit:junit:4.13.2")
