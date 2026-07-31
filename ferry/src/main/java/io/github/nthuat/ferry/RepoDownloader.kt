@@ -63,15 +63,30 @@ class RepoDownloader(
             return@withContext Result.failure(InsufficientSpaceException(report))
         }
 
+        var staging: File? = null
         try {
             // repoId is used as a relative path rather than flattened into one directory name, so
             // two distinct ids (e.g. "a/b" and "a--b") can never collide onto the same directory.
-            // Resolved through resolveInside because repoId comes from the calling app and cannot
-            // be trusted to stay under `into` — it could just as easily be "../../evil". That call
-            // does I/O and can throw, which is why staging/target moved inside this try rather than
-            // sitting above it.
-            val staging = resolveInside(into, ".staging/$repoId")
+            //
+            // staging is validated against stagingRoot (into/.staging), not against `into` itself:
+            // `into` is loose enough to contain both `.staging` and every already-committed repo, so
+            // a repoId like "../<other-repo>" resolves to that other repo's own directory and would
+            // still pass a check against `into`. Shrinking the boundary to the one directory a
+            // repoId's staging copy is actually allowed to land in closes that.
+            val stagingRoot = File(into, ".staging")
+            val stagingDir = resolveInside(stagingRoot, repoId)
+            staging = stagingDir
             val target = resolveInside(into, repoId)
+
+            // A repoId of ".staging/evil" resolves `target` to a path inside stagingRoot — not an
+            // escape (it never leaves `into`, so the check above misses it), but a collision with
+            // the reserved staging namespace that would let one repo's commit clobber another
+            // repo's in-flight staging copy, or vice versa.
+            val targetPath = target.canonicalPath
+            val stagingRootPath = stagingRoot.canonicalPath
+            if (targetPath == stagingRootPath || targetPath.startsWith(stagingRootPath + File.separator)) {
+                throw IOException("repo id collides with the staging area: $repoId")
+            }
 
             // Already here and still correct: the cheapest possible outcome, and the one a naive
             // implementation misses by re-fetching gigabytes the device is already holding.
@@ -84,12 +99,12 @@ class RepoDownloader(
                 return@withContext Result.success(target)
             }
 
-            staging.mkdirs()
+            stagingDir.mkdirs()
 
             manifest.files.forEachIndexed { index, remote ->
                 // remote.path comes from the hub's manifest over the network — untrusted the same
                 // way repoId is. Without this, a hostile listing could write anywhere on disk.
-                val destination = resolveInside(staging, remote.path)
+                val destination = resolveInside(stagingDir, remote.path)
                 destination.parentFile?.mkdirs()
 
                 downloader.download(
@@ -122,7 +137,7 @@ class RepoDownloader(
                 return@withContext Result.failure(IOException("cannot replace $target"))
             }
             target.parentFile?.mkdirs()
-            if (!staging.renameTo(target)) {
+            if (!stagingDir.renameTo(target)) {
                 return@withContext Result.failure(IOException("cannot commit $target"))
             }
 
@@ -135,12 +150,12 @@ class RepoDownloader(
             // .part files inside it, so removing it here forfeits resume; that is the trade for
             // never leaving a half-repo on disk, and is revisited when resume-across-launch lands.
             //
-            // Recomputed rather than reusing the `staging` above: that one lives inside the try
-            // and is out of scope here. resolveInside can throw a second time on the same bad
-            // repoId — swallowed with runCatching, since a rejected repoId never got as far as
-            // creating anything, and a throw from finally would replace the Result the try/catch
-            // above already produced instead of just failing to tidy up.
-            runCatching { resolveInside(into, ".staging/$repoId") }.getOrNull()?.deleteRecursively()
+            // Captured in the outer `staging` var rather than recomputed here: a second, independent
+            // resolveInside call in finally is exactly what let a too-loose boundary check silently
+            // agree with itself and delete an unrelated, already-committed repo. Reusing the one
+            // validated value means there is only one computation to get right, and if it was never
+            // assigned — repoId was rejected before staging was known — there is nothing to clean up.
+            staging?.deleteRecursively()
         }
     }
 

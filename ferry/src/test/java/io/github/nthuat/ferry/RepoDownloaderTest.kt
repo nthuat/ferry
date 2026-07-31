@@ -283,6 +283,43 @@ class RepoDownloaderTest {
         assertEquals(weightsBody, File(dir, "onnx/model.onnx").readText())
     }
 
+    /**
+     * The Critical this guards against: "../X" resolves harmlessly against `into` (the ".staging/"
+     * prefix and the ".." cancel out), landing exactly on the committed directory of an unrelated
+     * repo literally named "X" — not escaping `into` at all, just escaping the staging area while
+     * staying inside it. A single fresh-directory call can't observe this: `.staging` has to already
+     * exist on disk (true after the first download the library ever makes) for the raw path to
+     * resolve through it back to a sibling. Hence two calls: commit "X" for real, then attack it.
+     */
+    @Test
+    fun `a repo id that resolves through the staging area to another repo does not destroy it`() {
+        val filesX = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(configBody))
+        val dirX = runBlocking { downloaderFor(filesX).download("X", temp.root) }.getOrThrow()
+
+        val filesEvil = listOf(remote("evil.bin", weightsBody.length.toLong()))
+        val result = runBlocking { downloaderFor(filesEvil).download("../X", temp.root) }
+
+        assertTrue(result.isFailure)
+        assertEquals(
+            "an unrelated, already-committed repo must survive an attack routed through staging",
+            configBody,
+            File(dirX, "config.json").readText(),
+        )
+    }
+
+    /** ".staging/evil" never leaves `into`, but a target there collides with the reserved staging namespace. */
+    @Test
+    fun `a repo id inside the reserved staging namespace fails`() {
+        val files = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(configBody))
+
+        val result = runBlocking { downloaderFor(files).download(".staging/evil", temp.root) }
+
+        assertTrue(result.isFailure)
+        assertEquals("must not spend the user's data before validating the path", 0, server.requestCount)
+    }
+
     @Test
     fun `an http failure on one file fails the repo`() {
         val files = listOf(remote("model.bin", 100L))
