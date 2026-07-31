@@ -638,7 +638,12 @@ rather than download failed."
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
-- Produces: `object Sha256` with `fun of(file: File): String` returning lowercase hex, and `fun matches(file: File, expectedHex: String): Boolean`.
+- Produces: `internal object Sha256` with `fun of(file: File): String` returning lowercase hex, and `fun matches(file: File, expectedHex: String): Boolean`.
+  `internal`, not public: this is a primitive used by `RepoDownloader`, not part of Ferry's API. Both
+  functions do file I/O and can throw, and the no-throw constraint governs the *public boundary* —
+  which is `RepoDownloader.download`, whose `catch (e: IOException)` is where those failures become a
+  `Result.failure`. Making it public would put a throwing I/O function on the API surface and oblige
+  it to return `Result<String>` for a caller that is already inside a try.
 
 **Background the implementer needs:**
 
@@ -744,7 +749,7 @@ import java.security.MessageDigest
  * Streams in fixed chunks because model files are gigabytes and reading one into memory to hash it
  * would exhaust the heap on exactly the devices that most need this to work.
  */
-object Sha256 {
+internal object Sha256 {
 
     private const val BUFFER_BYTES = 64 * 1024
 
