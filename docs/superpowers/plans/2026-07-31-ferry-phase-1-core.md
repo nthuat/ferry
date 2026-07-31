@@ -1250,7 +1250,7 @@ Expected: FAIL — `nothing is committed when a file fails verification`. Restor
 If a mutation leaves the suite green, that guarantee is untested regardless of how many tests exist.
 Fix the test, not the mutation.
 
-Then re-run. Expected: PASS, 11 tests. Do not commit any mutation.
+Then re-run. Expected: PASS, 13 tests. Do not commit any mutation.
 
 - [ ] **Step 6: Commit**
 
