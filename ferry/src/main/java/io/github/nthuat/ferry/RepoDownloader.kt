@@ -31,7 +31,18 @@ class InsufficientSpaceException(val report: SpaceReport) : IOException(
         "short by ${report.shortfallBytes}",
 )
 
-class VerificationException(val path: String) : IOException("sha256 mismatch for $path")
+/**
+ * A downloaded file is not what the manifest said it would be.
+ *
+ * [reason] carries the specific mismatch because the two causes need different responses: a wrong
+ * SHA-256 is corruption in transit, a wrong size is usually an intermediary answering with something
+ * that is not the file at all — a captive portal's login page arrives with a perfectly consistent
+ * Content-Length and would otherwise pass every check.
+ */
+class VerificationException(
+    val path: String,
+    val reason: String,
+) : IOException("$path failed verification: $reason")
 
 /**
  * Names a committed directory as Ferry's own, and records which repo id owns it.
@@ -58,6 +69,15 @@ class RepoDownloader(
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
 
+    /**
+     * Downloads [repoId] into a directory under [into] and returns it.
+     *
+     * **Not safe to call concurrently for the same [repoId] and [into].** Both calls stage into the
+     * same scratch directory, so the first to finish deletes the other's in-flight work, and a
+     * rename by one while the other still holds open file descriptors into it follows the inode
+     * into the committed repo — writing into a directory that has already been verified. Serialising
+     * calls per repo id is the caller's responsibility; different repo ids are independent.
+     */
     suspend fun download(
         repoId: String,
         into: File,
@@ -66,6 +86,16 @@ class RepoDownloader(
         onProgress(RepoProgress.CheckingSpace(repoId))
 
         val manifest = repo.manifest(repoId).getOrElse { return@withContext Result.failure(it) }
+
+        // An empty manifest is a listing that failed without saying so — a hub answering 200 with
+        // [], a revision that does not exist, a filter that matched nothing. Refused here because
+        // every downstream check is written as "every file is correct", and every file of no files
+        // is trivially correct: the cache check would call any directory that happened to exist a
+        // hit and return it, and with nothing there the commit step would publish a repo containing
+        // only its own marker. Both are permanent cache hits that no later call can repair.
+        if (manifest.files.isEmpty()) {
+            return@withContext Result.failure(IOException("no files listed for $repoId"))
+        }
 
         // Before the first byte: spending a user's data allowance to discover the disk is full is
         // the failure this library exists to prevent.
@@ -134,13 +164,30 @@ class RepoDownloader(
                     )
                 }.getOrElse { return@withContext Result.failure(it) }
 
-                // A null sha256 means the hub published none. Size is still enforced upstream by
-                // ResumableDownloader, which fails a body shorter than the declared total.
-                if (remote.sha256 != null) {
-                    onProgress(RepoProgress.Verifying(repoId, remote.path))
-                    if (!Sha256.matches(destination, remote.sha256)) {
-                        return@withContext Result.failure(VerificationException(remote.path))
-                    }
+                onProgress(RepoProgress.Verifying(repoId, remote.path))
+
+                // Checked here and not delegated: ResumableDownloader compares what it wrote
+                // against the *server's own* declared length, so a self-consistent wrong response
+                // — a captive portal's login page, a hub serving an error document with a correct
+                // Content-Length — satisfies it at any size. This is the only place the manifest's
+                // figure is ever consulted, and for a file the hub published no sha256 for it is
+                // the whole of the verification. Skipped when the hub omits the size, which leaves
+                // such a hub exactly where it was rather than failing every file.
+                if (remote.sizeBytes > 0 && destination.length() != remote.sizeBytes) {
+                    return@withContext Result.failure(
+                        VerificationException(
+                            remote.path,
+                            "expected ${remote.sizeBytes} bytes, got ${destination.length()}",
+                        ),
+                    )
+                }
+
+                // A null sha256 means the hub published none; the size check above is then the only
+                // acceptance test, which is weaker and unavoidable.
+                if (remote.sha256 != null && !Sha256.matches(destination, remote.sha256)) {
+                    return@withContext Result.failure(
+                        VerificationException(remote.path, "sha256 mismatch"),
+                    )
                 }
             }
 
@@ -157,7 +204,8 @@ class RepoDownloader(
                 val marker = File(target, MARKER_FILE)
                 if (!marker.isFile || marker.readText() != repoId) {
                     throw IOException(
-                        "$target was not committed by Ferry under '$repoId'; refusing to replace it",
+                        "$target was not committed by Ferry under '$repoId'; refusing to replace " +
+                            "it — remove the directory to retry",
                     )
                 }
                 if (!target.deleteRecursively()) {

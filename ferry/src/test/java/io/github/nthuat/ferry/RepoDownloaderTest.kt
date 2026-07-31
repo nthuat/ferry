@@ -147,6 +147,53 @@ class RepoDownloaderTest {
         assertFalse("a half-verified repo must not be readable", committed.exists())
     }
 
+    /**
+     * A file the hub published no sha256 for is documented as "verified by size alone", so the size
+     * has to actually be checked somewhere. ResumableDownloader cannot do it: it compares what it
+     * wrote against the server's own declared length, which a captive portal's login page satisfies
+     * exactly. Without a check against the *manifest's* figure such a file is verified by nothing,
+     * and the acceptance test for a fresh download is weaker than the one for a cache hit — a repo
+     * that commits, then fails its own cache check on the next call, forever.
+     */
+    @Test
+    fun `a file whose size does not match the manifest fails the repo and commits nothing`() {
+        val loginPage = "<html>login</html>" // self-consistent, wrong length, no hash to catch it
+        val files = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(loginPage))
+
+        val result = runBlocking { downloaderFor(files).download("a/b", temp.root) }
+
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull() is VerificationException)
+        assertFalse(
+            "a repo whose file is the wrong size must not be readable",
+            File(temp.root, "a/b").exists(),
+        )
+    }
+
+    /**
+     * `files.all {}` on an empty list is true, so an empty manifest made the cache check vacuously
+     * true for any directory that happened to be sitting at the target path — returning
+     * Result.success pointing at something Ferry never wrote. With nothing there it fails the other
+     * way: the loop runs zero times and the commit publishes a repo containing only its own marker,
+     * which is then a permanent cache hit no later call can repair.
+     */
+    @Test
+    fun `a manifest with no files is refused rather than treated as satisfied`() {
+        val theirs = File(temp.root, "a/b/notes.txt")
+        theirs.parentFile?.mkdirs()
+        theirs.writeText("the user's own file")
+
+        val result = runBlocking { downloaderFor(emptyList()).download("a/b", temp.root) }
+
+        assertTrue(result.isFailure)
+        assertEquals(
+            "an empty manifest must not adopt a directory Ferry did not write",
+            "the user's own file",
+            theirs.readText(),
+        )
+    }
+
     @Test
     fun `files without a published hash are accepted`() {
         val files = listOf(remote("config.json", configBody.length.toLong()))
@@ -231,10 +278,17 @@ class RepoDownloaderTest {
     /**
      * "owner" and "owner/model" are both perfectly legitimate repo ids, and both resolve to strict
      * children of `into` — so no containment check catches this one. But into/owner *contains* the
-     * committed into/owner/model, and the commit step's deleteRecursively() took it along.
+     * committed into/owner/model, and the commit step's deleteRecursively() would take it along.
+     * What saves it here is the ownership marker: into/owner has none, so the commit is refused.
+     *
+     * **The reverse order is a known, accepted gap and is not tested because it is not fixed.**
+     * Commit "owner" first, then "owner/model", then re-download "owner" after a cache miss, and
+     * into/owner *does* carry a marker naming "owner" — the commit deletes it recursively and the
+     * inner repo goes with it. Closing that needs the commit step to know about repos nested under
+     * the one it is replacing, which is deliberately out of scope for this phase.
      */
     @Test
-    fun `a repo id whose directory contains another repo does not destroy it`() {
+    fun `an outer repo id is refused when the inner repo was committed first`() {
         val inner = listOf(remote("config.json", configBody.length.toLong()))
         server.enqueue(MockResponse().setBody(configBody))
         val committed =
