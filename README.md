@@ -73,6 +73,72 @@ representation, and OkHttp adds `Accept-Encoding: gzip` whenever neither it nor 
 then transparently decompresses. A first request without `Range` therefore fills the partial file
 with decompressed bytes, and its length is not a valid resume offset.
 
+## Adding a hub
+
+Only two things vary between hubs. Everything else — resume, verification, space, staging, atomic
+commit — is shared.
+
+```
+resolve manifest      hub-specific   ← implement this
+check free space      shared
+per file:
+  build file url      hub-specific   ← and this
+  download w/ resume  shared
+  verify sha256       shared
+commit atomically     shared
+```
+
+So a hub is one `ModelRepo` implementation, roughly forty lines:
+
+```kotlin
+interface ModelRepo {
+    suspend fun manifest(repoId: String): Result<RepoManifest>
+    fun fileUrl(repoId: String, path: String): String
+}
+```
+
+**The rule that keeps this honest: an adapter describes *what* to fetch, never *how*.** If a hub's
+behaviour forces its adapter to influence the transport, the abstraction has leaked and the fix
+belongs in the transport instead.
+
+That is not theoretical. ModelScope honours range requests but answers `200` with a valid
+`Content-Range` rather than `206`. The temptation is a per-hub flag. The correct fix was to make the
+transport read `Content-Range`'s start offset instead of trusting the status code — which is now
+right for every hub, including ones nobody has written an adapter for yet.
+
+### What the two implemented hubs look like
+
+| | HuggingFace | ModelScope |
+|---|---|---|
+| Listing | `/api/models/{id}/tree/main` | `/api/v1/models/{id}/repo/files?Revision=master` |
+| File type field | `type == "file"` | `Type == "blob"` |
+| SHA-256 location | `lfs.oid`, LFS files only | `Sha256`, **every file** |
+| Download | `/{id}/resolve/main/{path}` → 302 → CDN | `/api/v1/models/{id}/repo?Revision=master&FilePath={path}` |
+| Range response | `206` | `200` with `Content-Range` |
+| Default revision | `main` | `master` |
+
+Revision belongs to the adapter, not the interface — the two hubs already disagree on its default,
+so a shared parameter would only push the difference up a layer.
+
+### Four things that get harder than they look
+
+**Auth crosses a trust boundary.** OkHttp strips `Authorization` on a cross-host redirect, which is
+correct: your token must not reach a CDN. It is also why HuggingFace's redirect target is signed and
+expires — the signature replaces the token that was dropped. An adapter that "fixes" the missing
+token by forcing the header through the redirect is leaking a credential to a third party.
+
+**Rate limits are a shared concern.** Listing endpoints are rate-limited. Backoff belongs in the
+transport, once, not in each adapter.
+
+**Content-addressing enables mirroring.** Both hubs report the same SHA-256 for the same file —
+`model.safetensors` is `fdf756fa…` on each. So a failed hub can be retried on another and verified
+against the same expected hash. That is a property of the content, not of either hub, and it is the
+strongest argument for keeping verification in the shared layer.
+
+**Private repos change the manifest, not just the transport.** A gated model may list differently, or
+not at all, without a token. Handle it as a listing failure with a distinguishable cause, not as a
+download failure.
+
 ## Building
 
 ```bash
