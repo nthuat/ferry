@@ -129,4 +129,13 @@ class HuggingFaceTest {
             weights.url.endsWith("/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/model.safetensors"),
         )
     }
+
+    @Test
+    fun `an invalid baseUrl is returned as a failure, not thrown`() {
+        val invalidRepo = HuggingFace(OkHttpClient(), baseUrl = "huggingface.co")
+
+        val result = runBlocking { invalidRepo.manifest("any/repo") }
+
+        assertTrue(result.isFailure)
+    }
 }

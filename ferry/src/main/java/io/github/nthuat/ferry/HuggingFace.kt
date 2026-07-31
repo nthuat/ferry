@@ -23,8 +23,8 @@ class HuggingFace(
 ) : ModelRepo {
 
     override suspend fun manifest(repoId: String): Result<RepoManifest> = withContext(dispatcher) {
-        val request = Request.Builder().url("$baseUrl/api/models/$repoId/tree/main").build()
         try {
+            val request = Request.Builder().url("$baseUrl/api/models/$repoId/tree/main").build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
                     return@withContext Result.failure(
@@ -52,6 +52,8 @@ class HuggingFace(
             Result.failure(e)
         } catch (e: SerializationException) {
             Result.failure(IOException("malformed tree response for $repoId", e))
+        } catch (e: IllegalArgumentException) {
+            Result.failure(IOException("invalid base URL or repo ID", e))
         }
     }
 
