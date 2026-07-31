@@ -75,14 +75,13 @@ with decompressed bytes, and its length is not a valid resume offset.
 
 ## Adding a hub
 
-Only two things vary between hubs. Everything else — resume, verification, space, staging, atomic
-commit — is shared.
+Exactly one thing varies between hubs. Everything else — resume, verification, space, staging,
+atomic commit — is shared.
 
 ```
-resolve manifest      hub-specific   ← implement this
+resolve manifest      hub-specific   ← implement this, and only this
 check free space      shared
 per file:
-  build file url      hub-specific   ← and this
   download w/ resume  shared
   verify sha256       shared
 commit atomically     shared
@@ -116,7 +115,9 @@ That is not theoretical. ModelScope honours range requests but answers `200` wit
 transport read `Content-Range`'s start offset instead of trusting the status code — which is now
 right for every hub, including ones nobody has written an adapter for yet.
 
-### What the two implemented hubs look like
+### What three hubs look like
+
+HuggingFace is implemented. The other two are checked against their live APIs, not adapted yet.
 
 | | HuggingFace | ModelScope | Ollama |
 |---|---|---|---|
