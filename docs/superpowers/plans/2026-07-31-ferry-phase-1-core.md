@@ -32,7 +32,9 @@ requirement of this phase, and do not remove the `finally` to satisfy it.
 - **No Android APIs in any file in this plan.** Not `StatFs`, not `Context`, not `Log`. Every class here must be constructible and testable from a plain JVM unit test. `java.io.File.usableSpace` gives free space on Android and on the JVM, which is why `StatFs` is not needed.
 - **No WorkManager, no Service, no Compose, no dependency injection framework.** The two apps this library targets background work differently (MNN uses a foreground `Service`, Google's Gallery uses `CoroutineWorker`), so Ferry must have no opinion about backgrounding.
 - Every class doing I/O is dispatcher-injectable: a `CoroutineDispatcher` constructor parameter defaulting to `Dispatchers.IO`. The `ModelRepo` interface itself declares no dispatcher — implementations own that choice.
-- Public API returns `Result<T>`. Do not throw across the public boundary.
+- Do not throw across the public boundary. Operations that can fail — anything doing I/O — return
+  `Result<T>`. Total functions that cannot fail return their value directly; wrapping a pure
+  computation in `Result` is noise, not safety.
 - Tests run with `./gradlew :ferry:testDebugUnitTest`.
 - Every commit message follows `<type>: <description>` with types from: feat, fix, refactor, docs, test, chore, perf, ci.
 
