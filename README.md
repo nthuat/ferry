@@ -2,14 +2,25 @@
 
 Downloads AI model repositories to Android devices, and refuses to do it badly.
 
-> **Status: early.** The transport layer is written and tested. Repository semantics, verification
-> and the Android integration are not done yet. Not published to Maven, not ready to use.
+> **Status: core works.** Fetches a HuggingFace repo, refuses to start without the disk space to
+> finish it, and verifies every published SHA-256 before committing anything. Backgrounding, pause,
+> resume-across-launch and a second hub are not done. Not published to Maven.
 
 ```kotlin
-Ferry.to(context.filesDir)
-    .from(HuggingFace)
-    .fetch("google/gemma-2-2b-it")
-    .collect { progress -> … }
+val ferry = Ferry.huggingFace()
+
+ferry.download("google/gemma-2-2b-it", context.filesDir) { progress ->
+    when (progress) {
+        is RepoProgress.CheckingSpace -> …
+        is RepoProgress.Downloading -> …
+        is RepoProgress.Verifying -> …
+        is RepoProgress.Complete -> …
+    }
+}.onFailure { error ->
+    if (error is InsufficientSpaceException) {
+        // "needs 4.1 GB, 2.3 GB free" — before a single byte was transferred
+    }
+}
 ```
 
 ## Why this exists
