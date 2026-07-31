@@ -42,3 +42,36 @@ dependencies {
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
+
+/**
+ * Ferry must not force a host into an architecture. MNN backgrounds downloads with a foreground
+ * Service and Google's AI Edge Gallery with a CoroutineWorker; a dependency on either rules out the
+ * other. Adding one would otherwise be a one-line change with no failing test.
+ */
+val architectureDictatingDependencies = listOf(
+    "androidx.work",
+    "androidx.compose",
+    "androidx.lifecycle",
+    "com.google.dagger",
+    "io.insert-koin",
+)
+
+tasks.register("checkEmbeddable") {
+    group = "verification"
+    description = "Fails if Ferry gained a dependency that dictates how a host app is built."
+    doLast {
+        val offenders = configurations
+            .filter { it.isCanBeResolved && it.name.endsWith("RuntimeClasspath") }
+            .flatMap { configuration ->
+                configuration.incoming.resolutionResult.allDependencies
+                    .mapNotNull { it.requested as? org.gradle.api.artifacts.component.ModuleComponentSelector }
+                    .map { "${it.group}:${it.module}" }
+            }
+            .filter { dependency -> architectureDictatingDependencies.any { dependency.startsWith(it) } }
+            .distinct()
+
+        require(offenders.isEmpty()) {
+            "Ferry must not depend on these — they dictate the host's architecture: $offenders"
+        }
+    }
+}
