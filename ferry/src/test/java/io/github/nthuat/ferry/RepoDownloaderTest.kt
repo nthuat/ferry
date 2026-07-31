@@ -206,17 +206,72 @@ class RepoDownloaderTest {
         assertEquals("second call must not transfer bytes", requestsAfterFirst, server.requestCount)
     }
 
-    /** A present-but-wrong file is not a hit. Corruption on disk must be re-fetched, not trusted. */
+    /**
+     * A present-but-wrong file is not a hit. Corruption on disk must be re-fetched, not trusted.
+     *
+     * The repo is downloaded for real and *then* corrupted, rather than hand-built on disk. That
+     * makes the marker under test the one Ferry itself wrote, so this proves the ownership marker
+     * round-trips — Ferry accepts its own — instead of baking whatever format this implementation
+     * happens to use into a fixture. (The hand-built directory this test used to set up is not a
+     * corrupted Ferry repo at all; it is a foreign directory, which is now its own test below.)
+     */
     @Test
     fun `a present repo failing verification is downloaded again`() {
         val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
-        File(temp.root, "a/b").mkdirs()
-        File(temp.root, "a/b/model.bin").writeText("CORRUPTED")
         server.enqueue(MockResponse().setBody(weightsBody))
+        val first = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+        File(first, "model.bin").writeText("CORRUPTED")
 
+        server.enqueue(MockResponse().setBody(weightsBody))
         val dir = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
 
         assertEquals(weightsBody, File(dir, "model.bin").readText())
+    }
+
+    /**
+     * "owner" and "owner/model" are both perfectly legitimate repo ids, and both resolve to strict
+     * children of `into` — so no containment check catches this one. But into/owner *contains* the
+     * committed into/owner/model, and the commit step's deleteRecursively() took it along.
+     */
+    @Test
+    fun `a repo id whose directory contains another repo does not destroy it`() {
+        val inner = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(configBody))
+        val committed =
+            runBlocking { downloaderFor(inner).download("owner/model", temp.root) }.getOrThrow()
+
+        val outer = listOf(remote("evil.bin", weightsBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(weightsBody))
+        val result = runBlocking { downloaderFor(outer).download("owner", temp.root) }
+
+        assertEquals(
+            "a repo nested under another repo's id must survive",
+            configBody,
+            File(committed, "config.json").readText(),
+        )
+        assertTrue(result.isFailure)
+    }
+
+    /**
+     * A directory Ferry did not write — the user's own files, another tool's output — carries no
+     * ownership marker, so the commit step must refuse it rather than delete it to make room.
+     */
+    @Test
+    fun `a directory at the target path that ferry did not write is refused, not deleted`() {
+        val files = listOf(remote("model.bin", weightsBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(weightsBody))
+        val theirs = File(temp.root, "a/b/notes.txt")
+        theirs.parentFile?.mkdirs()
+        theirs.writeText("the user's own file")
+
+        val result = runBlocking { downloaderFor(files).download("a/b", temp.root) }
+
+        assertEquals(
+            "a directory ferry did not create must not be deleted to make room",
+            "the user's own file",
+            theirs.readText(),
+        )
+        assertTrue(result.isFailure)
     }
 
     /**

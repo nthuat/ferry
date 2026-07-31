@@ -34,6 +34,17 @@ class InsufficientSpaceException(val report: SpaceReport) : IOException(
 class VerificationException(val path: String) : IOException("sha256 mismatch for $path")
 
 /**
+ * Names a committed directory as Ferry's own, and records which repo id owns it.
+ *
+ * The commit step replaces whatever sits at the target path, and one repo id is free to be a
+ * directory prefix of another — "owner" and "owner/model" are both ordinary ids, and both resolve
+ * to strict children of the download root, so no containment check can tell them apart. Ferry
+ * therefore deletes only what it wrote under this exact id. A directory with no marker, or a
+ * marker naming a different id, is refused rather than removed.
+ */
+private const val MARKER_FILE = ".ferry"
+
+/**
  * Downloads a whole model repository, or none of it.
  *
  * Files land in a staging directory and are moved into place only once every one of them has
@@ -133,8 +144,25 @@ class RepoDownloader(
                 }
             }
 
-            if (target.exists() && !target.deleteRecursively()) {
-                return@withContext Result.failure(IOException("cannot replace $target"))
+            // Written into staging rather than into target after the rename, so the rename commits
+            // the marker atomically with the repo: a reader never sees a committed directory that
+            // has no marker, and a crash between the two cannot strand a repo that is then refused
+            // forever. Written after the download loop, so a manifest entry literally named
+            // ".ferry" cannot forge ownership of a directory — Ferry's own write always lands last.
+            File(stagingDir, MARKER_FILE).writeText(repoId)
+
+            if (target.exists()) {
+                // An absent marker is a refusal, not an exception: something Ferry did not write is
+                // sitting here, and that is precisely what must not be deleted to make room.
+                val marker = File(target, MARKER_FILE)
+                if (!marker.isFile || marker.readText() != repoId) {
+                    throw IOException(
+                        "$target was not committed by Ferry under '$repoId'; refusing to replace it",
+                    )
+                }
+                if (!target.deleteRecursively()) {
+                    return@withContext Result.failure(IOException("cannot replace $target"))
+                }
             }
             target.parentFile?.mkdirs()
             if (!stagingDir.renameTo(target)) {
