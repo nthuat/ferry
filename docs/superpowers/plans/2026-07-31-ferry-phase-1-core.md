@@ -70,9 +70,9 @@ Six small files rather than two large ones: `HuggingFace` will gain siblings (`M
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
 - Produces:
-  - `data class RemoteFile(val path: String, val sizeBytes: Long, val sha256: String?)`
+  - `data class RemoteFile(val path: String, val url: String, val sizeBytes: Long, val sha256: String?)`
   - `data class RepoManifest(val repoId: String, val files: List<RemoteFile>)` with `val totalBytes: Long`
-  - `interface ModelRepo { suspend fun manifest(repoId: String): Result<RepoManifest>; fun fileUrl(repoId: String, path: String): String }`
+  - `interface ModelRepo { suspend fun manifest(repoId: String): Result<RepoManifest> }`
   - `class HuggingFace(client: OkHttpClient, baseUrl: String = "https://huggingface.co", dispatcher: CoroutineDispatcher = Dispatchers.IO) : ModelRepo`
 
 **Background the implementer needs:**
@@ -221,10 +221,15 @@ class HuggingFaceTest {
     }
 
     @Test
-    fun `file url points at the resolve endpoint`() {
-        val url = repo.fileUrl("Qwen/Qwen2.5-0.5B-Instruct", "model.safetensors")
+    fun `each file carries a resolved download url`() {
+        server.enqueue(MockResponse().setBody(treeJson))
 
-        assertTrue(url.endsWith("/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/model.safetensors"))
+        val manifest = runBlocking { repo.manifest("Qwen/Qwen2.5-0.5B-Instruct") }.getOrThrow()
+        val weights = manifest.files.single { it.path == "model.safetensors" }
+
+        assertTrue(
+            weights.url.endsWith("/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/model.safetensors"),
+        )
     }
 }
 ```
@@ -248,7 +253,17 @@ package io.github.nthuat.ferry
  * and tokenizer files. Those are verified by size alone, which is weaker and unavoidable.
  */
 data class RemoteFile(
+    /** Where this file lands on disk, relative to the repo directory. */
     val path: String,
+    /**
+     * Where to fetch it from, resolved by the adapter while building the manifest.
+     *
+     * Carried here rather than derived later from [path] because not every hub names its files.
+     * Ollama serves content-addressed OCI blobs whose only identifier is a digest, so a stateless
+     * `fileUrl(repoId, path)` could not map a synthesized path back to one without re-fetching the
+     * manifest it already had.
+     */
+    val url: String,
     val sizeBytes: Long,
     val sha256: String?,
 )
@@ -268,8 +283,6 @@ data class RepoManifest(
 interface ModelRepo {
 
     suspend fun manifest(repoId: String): Result<RepoManifest>
-
-    fun fileUrl(repoId: String, path: String): String
 }
 ```
 
@@ -318,6 +331,7 @@ class HuggingFace(
                     .map { entry ->
                         RemoteFile(
                             path = entry.path,
+                            url = "$baseUrl/$repoId/resolve/main/${entry.path}",
                             // The lfs block carries the authoritative size for large files.
                             sizeBytes = entry.lfs?.size ?: entry.size,
                             // lfs.oid is the SHA-256. The sibling top-level `oid` is a git blob
@@ -333,9 +347,6 @@ class HuggingFace(
             Result.failure(IOException("malformed tree response for $repoId", e))
         }
     }
-
-    override fun fileUrl(repoId: String, path: String): String =
-        "$baseUrl/$repoId/resolve/main/$path"
 
     @Serializable
     private data class TreeEntry(
@@ -428,7 +439,7 @@ class SpaceCheckTest {
 
     private fun manifestOf(vararg sizes: Long) = RepoManifest(
         repoId = "test/repo",
-        files = sizes.mapIndexed { i, size -> RemoteFile("file$i.bin", size, null) },
+        files = sizes.mapIndexed { i, size -> RemoteFile("file$i.bin", "https://example.test/$i", size, null) },
     )
 
     private fun checkWith(freeBytes: Long, headroom: Long = 0L) =
@@ -835,10 +846,15 @@ class RepoDownloaderTest {
     private fun fakeRepo(files: List<RemoteFile>) = object : ModelRepo {
         override suspend fun manifest(repoId: String) =
             Result.success(RepoManifest(repoId, files))
-
-        override fun fileUrl(repoId: String, path: String) =
-            server.url("/$repoId/resolve/main/$path").toString()
     }
+
+    /** Builds a RemoteFile pointing at this test's server. */
+    private fun remote(path: String, size: Long, sha256: String? = null) = RemoteFile(
+        path = path,
+        url = server.url("/resolve/$path").toString(),
+        sizeBytes = size,
+        sha256 = sha256,
+    )
 
     private fun downloaderFor(
         files: List<RemoteFile>,
@@ -855,8 +871,8 @@ class RepoDownloaderTest {
     @Test
     fun `downloads every file and commits the directory`() {
         val files = listOf(
-            RemoteFile("config.json", configBody.length.toLong(), null),
-            RemoteFile("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)),
+            remote("config.json", configBody.length.toLong()),
+            remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)),
         )
         server.enqueue(MockResponse().setBody(configBody))
         server.enqueue(MockResponse().setBody(weightsBody))
@@ -869,7 +885,7 @@ class RepoDownloaderTest {
 
     @Test
     fun `a repo id containing a slash becomes one directory, not two`() {
-        val files = listOf(RemoteFile("config.json", configBody.length.toLong(), null))
+        val files = listOf(remote("config.json", configBody.length.toLong()))
         server.enqueue(MockResponse().setBody(configBody))
 
         val dir = runBlocking { downloaderFor(files).download("Qwen/Q-0.5B", temp.root) }.getOrThrow()
@@ -880,7 +896,7 @@ class RepoDownloaderTest {
 
     @Test
     fun `refuses to start when space is insufficient`() {
-        val files = listOf(RemoteFile("model.bin", 10_000L, null))
+        val files = listOf(remote("model.bin", 10_000L))
 
         val result = runBlocking { downloaderFor(files, freeBytes = 5_000L).download("a/b", temp.root) }
 
@@ -890,7 +906,7 @@ class RepoDownloaderTest {
 
     @Test
     fun `refusing on space makes no network request`() {
-        val files = listOf(RemoteFile("model.bin", 10_000L, null))
+        val files = listOf(remote("model.bin", 10_000L))
 
         runBlocking { downloaderFor(files, freeBytes = 5_000L).download("a/b", temp.root) }
 
@@ -899,7 +915,7 @@ class RepoDownloaderTest {
 
     @Test
     fun `the space failure carries the numbers needed to explain it`() {
-        val files = listOf(RemoteFile("model.bin", 10_000L, null))
+        val files = listOf(remote("model.bin", 10_000L))
 
         val result = runBlocking { downloaderFor(files, freeBytes = 4_000L).download("a/b", temp.root) }
         val report = (result.exceptionOrNull() as InsufficientSpaceException).report
@@ -911,7 +927,7 @@ class RepoDownloaderTest {
 
     @Test
     fun `a file failing verification fails the whole repo`() {
-        val files = listOf(RemoteFile("model.bin", weightsBody.length.toLong(), shaOf("SOMETHING ELSE")))
+        val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf("SOMETHING ELSE")))
         server.enqueue(MockResponse().setBody(weightsBody))
 
         val result = runBlocking { downloaderFor(files).download("a/b", temp.root) }
@@ -923,8 +939,8 @@ class RepoDownloaderTest {
     @Test
     fun `nothing is committed when a file fails verification`() {
         val files = listOf(
-            RemoteFile("config.json", configBody.length.toLong(), null),
-            RemoteFile("model.bin", weightsBody.length.toLong(), shaOf("SOMETHING ELSE")),
+            remote("config.json", configBody.length.toLong()),
+            remote("model.bin", weightsBody.length.toLong(), shaOf("SOMETHING ELSE")),
         )
         server.enqueue(MockResponse().setBody(configBody))
         server.enqueue(MockResponse().setBody(weightsBody))
@@ -937,7 +953,7 @@ class RepoDownloaderTest {
 
     @Test
     fun `files without a published hash are accepted`() {
-        val files = listOf(RemoteFile("config.json", configBody.length.toLong(), null))
+        val files = listOf(remote("config.json", configBody.length.toLong()))
         server.enqueue(MockResponse().setBody(configBody))
 
         assertTrue(runBlocking { downloaderFor(files).download("a/b", temp.root) }.isSuccess)
@@ -945,7 +961,7 @@ class RepoDownloaderTest {
 
     @Test
     fun `progress reports space check, every file, verification and completion`() {
-        val files = listOf(RemoteFile("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
+        val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
         server.enqueue(MockResponse().setBody(weightsBody))
 
         val seen = mutableListOf<RepoProgress>()
@@ -960,8 +976,8 @@ class RepoDownloaderTest {
     @Test
     fun `progress numbers each file within the repo`() {
         val files = listOf(
-            RemoteFile("config.json", configBody.length.toLong(), null),
-            RemoteFile("model.bin", weightsBody.length.toLong(), null),
+            remote("config.json", configBody.length.toLong()),
+            remote("model.bin", weightsBody.length.toLong()),
         )
         server.enqueue(MockResponse().setBody(configBody))
         server.enqueue(MockResponse().setBody(weightsBody))
@@ -977,7 +993,7 @@ class RepoDownloaderTest {
 
     @Test
     fun `an http failure on one file fails the repo`() {
-        val files = listOf(RemoteFile("model.bin", 100L, null))
+        val files = listOf(remote("model.bin", 100L))
         server.enqueue(MockResponse().setResponseCode(500))
 
         assertTrue(runBlocking { downloaderFor(files).download("a/b", temp.root) }.isFailure)
@@ -1074,7 +1090,7 @@ class RepoDownloader(
                 destination.parentFile?.mkdirs()
 
                 downloader.download(
-                    url = repo.fileUrl(repoId, remote.path),
+                    url = remote.url,
                     target = destination,
                 ) { written, _ ->
                     onProgress(

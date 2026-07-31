@@ -93,9 +93,19 @@ So a hub is one `ModelRepo` implementation, roughly forty lines:
 ```kotlin
 interface ModelRepo {
     suspend fun manifest(repoId: String): Result<RepoManifest>
-    fun fileUrl(repoId: String, path: String): String
 }
+
+data class RemoteFile(
+    val path: String,      // where it lands on disk
+    val url: String,       // where to fetch it, resolved by the adapter
+    val sizeBytes: Long,
+    val sha256: String?,
+)
 ```
+
+The URL is resolved while building the manifest rather than derived later, because not every hub
+names its files. Ollama serves content-addressed OCI blobs identified only by a digest, so a
+stateless `fileUrl(repoId, path)` could not map a synthesized path back to one.
 
 **The rule that keeps this honest: an adapter describes *what* to fetch, never *how*.** If a hub's
 behaviour forces its adapter to influence the transport, the abstraction has leaked and the fix
@@ -108,14 +118,19 @@ right for every hub, including ones nobody has written an adapter for yet.
 
 ### What the two implemented hubs look like
 
-| | HuggingFace | ModelScope |
-|---|---|---|
-| Listing | `/api/models/{id}/tree/main` | `/api/v1/models/{id}/repo/files?Revision=master` |
-| File type field | `type == "file"` | `Type == "blob"` |
-| SHA-256 location | `lfs.oid`, LFS files only | `Sha256`, **every file** |
-| Download | `/{id}/resolve/main/{path}` → 302 → CDN | `/api/v1/models/{id}/repo?Revision=master&FilePath={path}` |
-| Range response | `206` | `200` with `Content-Range` |
-| Default revision | `main` | `master` |
+| | HuggingFace | ModelScope | Ollama |
+|---|---|---|---|
+| Listing | `/api/models/{id}/tree/main` | `/api/v1/models/{id}/repo/files?Revision=master` | `/v2/library/{id}/manifests/{tag}` |
+| Auth to list | none | none | none |
+| File identity | `path` | `Path` | **none — digest only** |
+| File type field | `type == "file"` | `Type == "blob"` | every layer is a file |
+| SHA-256 | `lfs.oid`, LFS files only | `Sha256`, **every file** | the digest itself |
+| Download | `/{id}/resolve/main/{path}` → 302 | `/api/v1/models/{id}/repo?…&FilePath=` | `/v2/library/{id}/blobs/{digest}` → 307 |
+| Range response | `206` | **`200`** with `Content-Range` | `206` |
+| Default revision | `main` | `master` | a tag, e.g. `0.5b` |
+
+Kaggle Models answers `403` to an unauthenticated listing, so it needs API-key handling before an
+adapter is worth writing.
 
 Revision belongs to the adapter, not the interface — the two hubs already disagree on its default,
 so a shared parameter would only push the difference up a layer.
