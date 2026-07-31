@@ -8,8 +8,11 @@ import java.security.MessageDigest
  *
  * Streams in fixed chunks because model files are gigabytes and reading one into memory to hash it
  * would exhaust the heap on exactly the devices that most need this to work.
+ *
+ * Internal primitive: I/O failures are caught by [RepoDownloader.download], the public boundary,
+ * which converts them to [Result.failure].
  */
-object Sha256 {
+internal object Sha256 {
 
     private const val BUFFER_BYTES = 64 * 1024
 
