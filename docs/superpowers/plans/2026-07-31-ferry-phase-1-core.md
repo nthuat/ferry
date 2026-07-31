@@ -10,6 +10,14 @@
 
 ## Global Constraints
 
+- **TDD is not optional here, and step 2 is the point of it.** Write the test, run it, watch it
+  fail, then implement. A test written after the code passes for reasons nobody checked.
+- **A compilation error is a weak red.** It proves the class was missing, not that the assertion
+  would catch a wrong implementation. Tasks 2 and 4 therefore carry an explicit mutation step:
+  break the implementation on purpose, confirm the right tests go red, restore. An assertion that
+  cannot fail is worse than no assertion, because it reports safety it never checked.
+- **Never edit a test to match a failing implementation** unless the test's own setup is wrong —
+  and if it is, say so out loud rather than quietly adjusting it.
 - Package for all new code: `io.github.nthuat.ferry`
 - Kotlin `2.0.21`, JVM target `17`, `minSdk 26`, `compileSdk 35`, AGP `8.7.3`
 - `allWarningsAsErrors.set(true)` is already on in `ferry/build.gradle.kts`. Unused imports, unused parameters, and deprecation warnings **fail the build**. Do not add an import you do not use.
@@ -566,7 +574,27 @@ class SpaceCheck(
 Run: `./gradlew :ferry:testDebugUnitTest --tests "*SpaceCheckTest*"`
 Expected: PASS, 8 tests.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Prove the tests can actually fail**
+
+Step 2's red was a compilation error, which proves only that the class was missing — not that these
+assertions would catch a wrong implementation. An assertion that cannot fail is worse than no
+assertion, because it reports safety it never checked.
+
+Temporarily invert the comparison in `SpaceReport`:
+
+```kotlin
+val sufficient: Boolean get() = freeBytes <= requiredBytes + headroomBytes
+```
+
+Run: `./gradlew :ferry:testDebugUnitTest --tests "*SpaceCheckTest*"`
+Expected: FAIL — `sufficient when free space exceeds the total`, `headroom is required on top of the
+repo size`, and `an empty repo needs only headroom`.
+
+If any of those still passes, that test is vacuous and must be fixed before continuing.
+
+Then restore the original line and re-run. Expected: PASS, 8 tests. Do not commit the mutation.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add ferry/src/main/java/io/github/nthuat/ferry/SpaceCheck.kt \
@@ -1104,7 +1132,43 @@ class RepoDownloader(
 Run: `./gradlew :ferry:testDebugUnitTest --tests "*RepoDownloaderTest*"`
 Expected: PASS, 11 tests.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Prove the guarantee tests can actually fail**
+
+These are the assertions the library's promises rest on. Verify each one can go red.
+
+Mutation A — remove the space guard. Delete these three lines from `download`:
+
+```kotlin
+        if (!report.sufficient) {
+            return@withContext Result.failure(InsufficientSpaceException(report))
+        }
+```
+
+Expected: FAIL — `refuses to start when space is insufficient`, `refusing on space makes no network
+request`, and `the space failure carries the numbers needed to explain it`. Restore them.
+
+Mutation B — commit without verifying. Change the hash check to:
+
+```kotlin
+                if (remote.sha256 != null) {
+                    onProgress(RepoProgress.Verifying(repoId, remote.path))
+                }
+```
+
+Expected: FAIL — `a file failing verification fails the whole repo` and `nothing is committed when a
+file fails verification`. Restore it.
+
+Mutation C — commit before verifying rather than after. Move the `staging.renameTo(target)` block
+above the `forEachIndexed` loop.
+
+Expected: FAIL — `nothing is committed when a file fails verification`. Restore it.
+
+If a mutation leaves the suite green, that guarantee is untested regardless of how many tests exist.
+Fix the test, not the mutation.
+
+Then re-run. Expected: PASS, 11 tests. Do not commit any mutation.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add ferry/src/main/java/io/github/nthuat/ferry/RepoDownloader.kt \
