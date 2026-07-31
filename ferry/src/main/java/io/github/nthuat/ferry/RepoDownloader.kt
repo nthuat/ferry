@@ -63,12 +63,16 @@ class RepoDownloader(
             return@withContext Result.failure(InsufficientSpaceException(report))
         }
 
-        // repoId is used as a relative path rather than flattened into one directory name, so two
-        // distinct ids (e.g. "a/b" and "a--b") can never collide onto the same directory.
-        val staging = File(into, ".staging/$repoId")
-        val target = File(into, repoId)
-
         try {
+            // repoId is used as a relative path rather than flattened into one directory name, so
+            // two distinct ids (e.g. "a/b" and "a--b") can never collide onto the same directory.
+            // Resolved through resolveInside because repoId comes from the calling app and cannot
+            // be trusted to stay under `into` — it could just as easily be "../../evil". That call
+            // does I/O and can throw, which is why staging/target moved inside this try rather than
+            // sitting above it.
+            val staging = resolveInside(into, ".staging/$repoId")
+            val target = resolveInside(into, repoId)
+
             // Already here and still correct: the cheapest possible outcome, and the one a naive
             // implementation misses by re-fetching gigabytes the device is already holding.
             //
@@ -83,7 +87,9 @@ class RepoDownloader(
             staging.mkdirs()
 
             manifest.files.forEachIndexed { index, remote ->
-                val destination = File(staging, remote.path)
+                // remote.path comes from the hub's manifest over the network — untrusted the same
+                // way repoId is. Without this, a hostile listing could write anywhere on disk.
+                val destination = resolveInside(staging, remote.path)
                 destination.parentFile?.mkdirs()
 
                 downloader.download(
@@ -128,7 +134,13 @@ class RepoDownloader(
             // Staging survives only as long as the attempt. ResumableDownloader keeps its own
             // .part files inside it, so removing it here forfeits resume; that is the trade for
             // never leaving a half-repo on disk, and is revisited when resume-across-launch lands.
-            staging.deleteRecursively()
+            //
+            // Recomputed rather than reusing the `staging` above: that one lives inside the try
+            // and is out of scope here. resolveInside can throw a second time on the same bad
+            // repoId — swallowed with runCatching, since a rejected repoId never got as far as
+            // creating anything, and a throw from finally would replace the Result the try/catch
+            // above already produced instead of just failing to tidy up.
+            runCatching { resolveInside(into, ".staging/$repoId") }.getOrNull()?.deleteRecursively()
         }
     }
 
@@ -140,9 +152,27 @@ class RepoDownloader(
      * once, and the point of the check is what is true now.
      */
     private fun RepoManifest.isSatisfiedBy(dir: File): Boolean = files.all { remote ->
-        val onDisk = File(dir, remote.path)
+        val onDisk = resolveInside(dir, remote.path)
         onDisk.isFile &&
             onDisk.length() == remote.sizeBytes &&
             (remote.sha256 == null || Sha256.matches(onDisk, remote.sha256))
+    }
+
+    /**
+     * Resolves [relative] inside [parent] and fails if it escapes.
+     *
+     * Repo ids come from the calling app and file paths come from the hub's manifest over the
+     * network, so neither can be trusted to stay inside the directory it is joined to. Canonical
+     * paths are compared rather than the raw strings so that "..", symlinks, and redundant
+     * separators are all resolved before the comparison rather than pattern-matched.
+     */
+    private fun resolveInside(parent: File, relative: String): File {
+        val candidate = File(parent, relative)
+        val root = parent.canonicalPath
+        val resolved = candidate.canonicalPath
+        if (resolved != root && !resolved.startsWith(root + File.separator)) {
+            throw IOException("path escapes $parent: $relative")
+        }
+        return candidate
     }
 }

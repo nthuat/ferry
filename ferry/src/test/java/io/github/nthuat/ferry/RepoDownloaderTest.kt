@@ -237,6 +237,52 @@ class RepoDownloaderTest {
         assertTrue(result.isFailure)
     }
 
+    /**
+     * repoId comes from the calling app; a hostile or buggy caller must not escape `into`. The
+     * response is enqueued (even though the fixed code must never consume it) so that a mutated,
+     * unguarded version of this code would actually complete the write — otherwise this test would
+     * pass for the wrong reason, via an unrelated network timeout instead of the escape being caught.
+     */
+    @Test
+    fun `a repo id that tries to escape the target directory fails instead of writing outside it`() {
+        val files = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(configBody))
+        val escaped = File(temp.root.parentFile, "escape")
+
+        val result = runBlocking { downloaderFor(files).download("../escape", temp.root) }
+
+        assertTrue(result.isFailure)
+        assertFalse("must not create anything outside the target directory", escaped.exists())
+        assertEquals("must not spend the user's data before validating the path", 0, server.requestCount)
+    }
+
+    /**
+     * remote.path comes from the hub's manifest over the network. A hostile or compromised listing
+     * must not turn a download into an arbitrary file write outside the staging directory.
+     */
+    @Test
+    fun `a manifest file path that tries to escape the staging directory fails and writes nothing outside it`() {
+        val files = listOf(remote("../../escaped.bin", weightsBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(weightsBody))
+        val escaped = File(temp.root, "escaped.bin")
+
+        val result = runBlocking { downloaderFor(files).download("repo", temp.root) }
+
+        assertTrue(result.isFailure)
+        assertFalse("must not write outside the staging directory", escaped.exists())
+    }
+
+    /** The escape check must reject only real escapes, not ordinary subdirectories within a repo. */
+    @Test
+    fun `a file path containing a legitimate subdirectory still downloads`() {
+        val files = listOf(remote("onnx/model.onnx", weightsBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(weightsBody))
+
+        val dir = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+
+        assertEquals(weightsBody, File(dir, "onnx/model.onnx").readText())
+    }
+
     @Test
     fun `an http failure on one file fails the repo`() {
         val files = listOf(remote("model.bin", 100L))
