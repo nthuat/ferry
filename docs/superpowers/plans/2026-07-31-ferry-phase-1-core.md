@@ -1614,7 +1614,13 @@ Named so they are not smuggled in:
 - **Backgrounding.** No `CoroutineWorker`, no foreground `Service`, no notification. Separate plan.
 - **Resume across launches.** `RepoDownloader` currently deletes staging in its `finally` block, which forfeits partial progress. Making that survive needs persisted state and is a separate plan; the trade is called out in the code.
 - **Pause and cancel.** Coroutine cancellation works; an app-driven pause API does not exist.
-- **ModelScope.** `ModelRepo` exists so it can be added; it is not added here.
+- **ModelScope.** `ModelRepo` exists so it can be added; it is not added here. The API was checked
+  and the abstraction holds — `GET /api/v1/models/{repoId}/repo/files?Revision=master` returns
+  `Path`, `Size`, `Sha256` and `Type` per entry, so `RemoteFile` needs no new field. Two differences
+  to carry into that task: ModelScope publishes `Sha256` for *every* file rather than only LFS ones,
+  which makes verification strictly stronger there than on HuggingFace, and `Type` is `"blob"` where
+  HuggingFace says `"file"`. Its transport quirk — answering 200 with a valid `Content-Range` — is
+  already handled in `ResumableDownloader`.
 - **Parallel file downloads.** Sequential only.
 - **Private repos and auth tokens.** Public models only.
 - **Maven publishing.**
