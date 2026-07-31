@@ -202,6 +202,18 @@ class ResumableDownloaderTest {
         assertEquals("identity", server.takeRequest().getHeader("Accept-Encoding"))
     }
 
+    /**
+     * Request.Builder.url throws IllegalArgumentException, not IOException, for a malformed URL.
+     * RemoteFile.url reaches here from a ModelRepo implementation, and ModelRepo is public — so a
+     * third-party adapter's bad URL would otherwise throw straight out of a Result-returning call.
+     */
+    @Test
+    fun `a malformed url is returned as a failure, not thrown`() {
+        val result = runBlocking { downloader.download("not a url", target()) }
+
+        assertTrue(result.isFailure)
+    }
+
     @Test
     fun `an http error is reported and does not create the target`() {
         server.enqueue(MockResponse().setResponseCode(404))
