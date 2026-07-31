@@ -4,6 +4,14 @@
 
 **Goal:** Download a HuggingFace model repository to a directory, refusing to start if it cannot fit and refusing to commit if any file fails its SHA-256.
 
+**Guarantee 4 is scoped down for this phase, deliberately.** The README states "always resumable";
+what this phase delivers is resumability *within one download attempt* — `ResumableDownloader`
+recovers from a dropped connection, and `RepoDownloader` skips files already present and verified.
+Resuming across process death does not work here, because `RepoDownloader` deletes its staging
+directory in a `finally` block to guarantee no half-written repo survives a failure. Both cannot be
+true at once without persisted state, which is its own plan. Do not treat the README's wording as a
+requirement of this phase, and do not remove the `finally` to satisfy it.
+
 **Architecture:** A `ModelRepo` interface describes a hub; `HuggingFace` implements it by reading the public tree API. `RepoDownloader` orchestrates: check space, download each file through the existing `ResumableDownloader` into a staging directory, verify each hash, then move the whole directory into place. Nothing reaches the final path until every file verifies, so a reader never sees a partial or corrupt repo.
 
 **Tech Stack:** Kotlin 2.0.21, OkHttp 4.12.0, kotlinx-serialization-json 1.7.3, kotlinx-coroutines 1.9.0, JUnit 4.13.2, MockWebServer 4.12.0.
@@ -23,7 +31,7 @@
 - `allWarningsAsErrors.set(true)` is already on in `ferry/build.gradle.kts`. Unused imports, unused parameters, and deprecation warnings **fail the build**. Do not add an import you do not use.
 - **No Android APIs in any file in this plan.** Not `StatFs`, not `Context`, not `Log`. Every class here must be constructible and testable from a plain JVM unit test. `java.io.File.usableSpace` gives free space on Android and on the JVM, which is why `StatFs` is not needed.
 - **No WorkManager, no Service, no Compose, no dependency injection framework.** The two apps this library targets background work differently (MNN uses a foreground `Service`, Google's Gallery uses `CoroutineWorker`), so Ferry must have no opinion about backgrounding.
-- All suspend entry points take a `CoroutineDispatcher` parameter defaulting to `Dispatchers.IO`, so tests can inject a deterministic one.
+- Every class doing I/O is dispatcher-injectable: a `CoroutineDispatcher` constructor parameter defaulting to `Dispatchers.IO`. The `ModelRepo` interface itself declares no dispatcher — implementations own that choice.
 - Public API returns `Result<T>`. Do not throw across the public boundary.
 - Tests run with `./gradlew :ferry:testDebugUnitTest`.
 - Every commit message follows `<type>: <description>` with types from: feat, fix, refactor, docs, test, chore, perf, ci.
@@ -1577,13 +1585,14 @@ class EmbeddabilityTest {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run the tests — expect green, and do not treat that as proof**
 
 Run: `./gradlew :ferry:testDebugUnitTest --tests "*EmbeddabilityTest*"`
 Expected: PASS, both tests, if Task 5 was implemented correctly.
 
-**A green here is not proof.** These are characterization tests over behaviour that should already
-hold, so the red comes from step 3 instead.
+This step is deliberately not a red step. These are characterization tests over behaviour that
+should already hold after Task 5, so there is nothing to implement and nothing to fail. Their red
+comes from step 3's mutation instead, which is what actually proves they can fail.
 
 - [ ] **Step 3: Prove the client test can fail**
 
