@@ -1380,6 +1380,233 @@ differently and imposing either would rule out one of them."
 
 ---
 
+### Task 6: Embeddability contract
+
+**Files:**
+- Create: `ferry/src/test/java/io/github/nthuat/ferry/EmbeddabilityTest.kt`
+- Modify: `ferry/build.gradle.kts` — append the `checkEmbeddable` task
+
+**Interfaces:**
+- Consumes: `Ferry` (Task 5), `RepoProgress` (Task 4).
+- Produces: a Gradle task `checkEmbeddable`. No new production types.
+
+**Background the implementer needs:**
+
+The Global Constraints forbid WorkManager, Service, Compose and DI. Nothing so far enforces that,
+and the constraint is the whole reason the library could be adopted: MNN backgrounds downloads with
+a foreground `Service`, Google's AI Edge Gallery with a `CoroutineWorker`. A library that drags in
+either one rules out the other host.
+
+Two properties matter, and both are mechanically checkable:
+
+1. **A host supplies its own `OkHttpClient`.** MNN's client carries their interceptors, timeouts and
+   proxy configuration. If Ferry quietly constructs its own for some requests, adopting it means
+   losing all of that on those requests — a defect that is invisible until something in production
+   needs an interceptor that silently is not there.
+2. **The dependency set does not dictate architecture.** Adding `androidx.work` later would be a
+   one-line change with no failing test, and would silently make Ferry un-adoptable by MNN.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `ferry/src/test/java/io/github/nthuat/ferry/EmbeddabilityTest.kt`:
+
+```kotlin
+package io.github.nthuat.ferry
+
+import kotlinx.coroutines.runBlocking
+import okhttp3.Interceptor
+import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+
+/**
+ * Ferry has to slot into a host that already decided how it backgrounds work and how it talks HTTP.
+ * These assertions are the contract that makes that possible.
+ */
+class EmbeddabilityTest {
+
+    @get:Rule
+    val temp = TemporaryFolder()
+
+    private lateinit var server: MockWebServer
+
+    private val configBody = """{"model_type":"qwen2"}"""
+
+    private val treeJson = """
+        [ { "type": "file", "path": "config.json", "size": ${configBody.length} } ]
+    """.trimIndent()
+
+    @Before
+    fun setUp() {
+        server = MockWebServer().apply { start() }
+    }
+
+    @After
+    fun tearDown() {
+        server.shutdown()
+    }
+
+    /**
+     * Every request, for the manifest and for the files, must travel through the client the host
+     * handed over. A host's auth interceptor that fires on some requests and not others is worse
+     * than one that never fires, because it works in testing.
+     */
+    @Test
+    fun `every request goes through the caller's http client`() {
+        val seenByHost = mutableListOf<String>()
+        val hostClient = OkHttpClient.Builder()
+            .addInterceptor(Interceptor { chain ->
+                seenByHost += chain.request().url.encodedPath
+                chain.proceed(chain.request())
+            })
+            .build()
+
+        server.enqueue(MockResponse().setBody(treeJson))
+        server.enqueue(MockResponse().setBody(configBody))
+
+        val ferry = Ferry.huggingFace(
+            client = hostClient,
+            baseUrl = server.url("/").toString().trimEnd('/'),
+        )
+        runBlocking { ferry.download("Qwen/Q-0.5B", temp.root) }
+
+        assertEquals(
+            "manifest and file requests must both be visible to the host",
+            2,
+            seenByHost.size,
+        )
+        assertTrue(seenByHost.any { it.contains("/tree/main") })
+        assertTrue(seenByHost.any { it.contains("/resolve/main/config.json") })
+    }
+
+    /**
+     * The whole API is driven here from a plain JVM test with no Android object of any kind. If
+     * this file ever needs a Context, a Looper or Robolectric, the library stopped being
+     * embeddable in something that is not structured like the sample app.
+     */
+    @Test
+    fun `the api is exercisable without any android object`() {
+        server.enqueue(MockResponse().setBody(treeJson))
+        server.enqueue(MockResponse().setBody(configBody))
+
+        val progress = mutableListOf<RepoProgress>()
+        val result = runBlocking {
+            Ferry.huggingFace(baseUrl = server.url("/").toString().trimEnd('/'))
+                .download("Qwen/Q-0.5B", temp.root) { progress += it }
+        }
+
+        assertTrue(result.isSuccess)
+        assertTrue(progress.last() is RepoProgress.Complete)
+    }
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `./gradlew :ferry:testDebugUnitTest --tests "*EmbeddabilityTest*"`
+Expected: PASS, both tests, if Task 5 was implemented correctly.
+
+**A green here is not proof.** These are characterization tests over behaviour that should already
+hold, so the red comes from step 3 instead.
+
+- [ ] **Step 3: Prove the client test can fail**
+
+In `Ferry.kt`, mutate the facade so the downloader builds its own client — the exact regression this
+test exists to catch:
+
+```kotlin
+        downloader = ResumableDownloader(OkHttpClient()),
+```
+
+Run: `./gradlew :ferry:testDebugUnitTest --tests "*EmbeddabilityTest*"`
+Expected: FAIL — `every request goes through the caller's http client`, seeing 1 request rather
+than 2.
+
+That failure is the whole point: the manifest call still goes through the host's client, the file
+download silently does not. Restore `ResumableDownloader(client)` and re-run. Expected: PASS.
+
+- [ ] **Step 4: Add the dependency guard**
+
+Append to `ferry/build.gradle.kts`:
+
+```kotlin
+/**
+ * Ferry must not force a host into an architecture. MNN backgrounds downloads with a foreground
+ * Service and Google's AI Edge Gallery with a CoroutineWorker; a dependency on either rules out the
+ * other. Adding one would otherwise be a one-line change with no failing test.
+ */
+val architectureDictatingDependencies = listOf(
+    "androidx.work",
+    "androidx.compose",
+    "androidx.lifecycle",
+    "com.google.dagger",
+    "io.insert-koin",
+)
+
+tasks.register("checkEmbeddable") {
+    group = "verification"
+    description = "Fails if Ferry gained a dependency that dictates how a host app is built."
+    doLast {
+        val offenders = configurations
+            .filter { it.isCanBeResolved && it.name.endsWith("RuntimeClasspath") }
+            .flatMap { configuration ->
+                configuration.incoming.resolutionResult.allDependencies
+                    .mapNotNull { it.requested as? org.gradle.api.artifacts.component.ModuleComponentSelector }
+                    .map { "${it.group}:${it.module}" }
+            }
+            .filter { dependency -> architectureDictatingDependencies.any { dependency.startsWith(it) } }
+            .distinct()
+
+        require(offenders.isEmpty()) {
+            "Ferry must not depend on these — they dictate the host's architecture: $offenders"
+        }
+    }
+}
+```
+
+- [ ] **Step 5: Run the guard and prove it can fail**
+
+Run: `./gradlew :ferry:checkEmbeddable`
+Expected: PASS.
+
+Now add `implementation("androidx.work:work-runtime-ktx:2.9.1")` to the `dependencies` block and run
+it again.
+Expected: FAIL — `Ferry must not depend on these ... [androidx.work:work-runtime-ktx]`.
+
+Remove the line and re-run. Expected: PASS. Do not commit the added dependency.
+
+⚠ If `checkEmbeddable` reports zero configurations inspected, the runtime configuration name differs
+in this AGP version. Print `configurations.filter { it.isCanBeResolved }.map { it.name }` and match
+the one ending in `RuntimeClasspath`.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add ferry/src/test/java/io/github/nthuat/ferry/EmbeddabilityTest.kt \
+        ferry/build.gradle.kts
+git commit -m "test: enforce the embeddability contract
+
+The constraint that Ferry imposes no architecture was written down and checked by
+nobody, which makes it a comment. MNN backgrounds downloads with a foreground
+Service and Google's AI Edge Gallery with a CoroutineWorker, so a dependency on
+either would silently rule out one of the two hosts this exists for.
+
+Two mechanical checks. Every request must travel through the host's own
+OkHttpClient, because an auth interceptor that fires on the manifest call and not
+the file download is worse than one that never fires — it works in testing. And a
+Gradle task fails the build if an architecture-dictating dependency appears, which
+would otherwise be a one-line change with no failing test."
+```
+
+---
+
 ## Out of Scope
 
 Named so they are not smuggled in:
@@ -1391,4 +1618,10 @@ Named so they are not smuggled in:
 - **Parallel file downloads.** Sequential only.
 - **Private repos and auth tokens.** Public models only.
 - **Maven publishing.**
-- **The sample app.** Separate plan.
+- **The sample app.** Separate plan, not yet written.
+- **Upstreaming findings to MNN.** The three candidate pull requests — free-space precheck, the
+  200-versus-206 guard, and `If-Range` — are recorded in the private strategy document, not here.
+  They are contributions to someone else's repository rather than work in this one, and MNN adopting
+  Ferry as a dependency is not a realistic outcome to plan around. Task 6 covers the half of
+  integration that belongs to this codebase: making adoption *possible*. Making it *happen* is a
+  different deliverable with a different plan.
