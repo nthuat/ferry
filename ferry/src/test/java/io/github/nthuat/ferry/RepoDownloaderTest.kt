@@ -288,13 +288,25 @@ class RepoDownloaderTest {
         runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
         val requestsAfterFirst = server.requestCount
 
-        val result = runBlocking { downloaderFor(files, freeBytes = 1L).download("a/b", temp.root) }
+        val seen = mutableListOf<RepoProgress>()
+        val result = runBlocking {
+            downloaderFor(files, freeBytes = 1L).download("a/b", temp.root) { seen += it }
+        }
 
         assertTrue(result.isSuccess)
         assertEquals(
             "a cache hit must not transfer any bytes, no matter how little space is free",
             requestsAfterFirst,
             server.requestCount,
+        )
+        // Pins the one observable API change the reorder makes: a cache hit used to report
+        // CheckingSpace then Complete; it now reports Complete alone, since the space check it
+        // used to precede never runs at all on this path (see ProgressMapping.kt's own doc).
+        assertEquals("a cache hit must fire exactly one progress event", 1, seen.size)
+        assertTrue(
+            "a cache hit must fire Complete alone; CheckingSpace never fires when the space check " +
+                "itself never runs",
+            seen.single() is RepoProgress.Complete,
         )
     }
 
@@ -326,6 +338,7 @@ class RepoDownloaderTest {
         val result = runBlocking { downloaderFor(files).download("../escape", downloadRoot) }
 
         assertTrue("an escaping repo id must be refused, not treated as a cache hit", result.isFailure)
+        assertEquals("must not spend the user's data before validating the path", 0, server.requestCount)
     }
 
     /**

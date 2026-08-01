@@ -12,7 +12,12 @@ sealed interface DownloadState {
     /** Nothing has been asked of this repo yet. */
     data object Available : DownloadState
 
-    /** The manifest is being fetched and free space checked — brief, but real network time. */
+    /**
+     * Free space is being checked — a fast, local stat (`File.usableSpace`), not network time: the
+     * manifest has already been fetched by the time this ever fires. Skipped entirely on a cache
+     * hit, which needs no space check at all — a `Downloaded` row can arrive with no `CheckingSpace`
+     * in between (see `ProgressMapping.kt`'s own doc on `toDownloadState`).
+     */
     data object CheckingSpace : DownloadState
 
     /**
