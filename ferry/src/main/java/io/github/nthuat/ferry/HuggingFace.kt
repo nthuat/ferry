@@ -167,8 +167,13 @@ class HuggingFace(
         /**
          * `rel="next"`, or the unquoted `rel=next` that RFC 8288 also permits. The trailing
          * lookahead is what stops this matching `rel=nextpage`.
+         *
+         * Anchored to `;` (a parameter boundary) or the start of the segment so this only matches
+         * the actual `rel` attribute, never a `rel=next` that happens to appear inside the URL
+         * itself — a `prev` link whose own target carries an ordinary `?rel=next` query parameter
+         * would otherwise read as `rel="next"` regardless of what its real rel attribute says.
          */
-        val NEXT_REL = Regex("""rel="?next"?(?![\w-])""")
+        val NEXT_REL = Regex("""(?:^|;)\s*rel="?next"?(?![\w-])""")
 
         /**
          * ignoreUnknownKeys is load-bearing, not hygiene. HuggingFace adds fields to this response

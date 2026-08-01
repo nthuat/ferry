@@ -184,6 +184,40 @@ class HuggingFaceTest {
     }
 
     /**
+     * NEXT_REL used to be matched with `containsMatchIn` against the whole Link segment, URL
+     * included — the shape from docs/known-limitations.md is `<https://huggingface.co/api/models/
+     * x/tree/main?rel=next>; rel="prev"` — so a `prev` link whose own URL happens to carry an
+     * ordinary `?rel=next` query parameter was misidentified as the next page.
+     *
+     * Reproduced here on the mock server rather than the literal huggingface.co URL so the guard
+     * under test is the regex anchor and not the separate same-origin check: production bounds the
+     * live version of this bug to an out-of-turn *same-origin* fetch, so the test has to actually be
+     * same-origin to exercise that path. A second page is enqueued so a regression that does chase
+     * the link gets an immediate, deterministic answer instead of this test hanging on an empty
+     * response queue.
+     */
+    @Test
+    fun `a prev link whose url contains rel=next in its own query string is not treated as next`() {
+        server.enqueue(
+            MockResponse()
+                .setBody("""[ { "type": "file", "path": "page1.bin", "size": 10 } ]""")
+                .addHeader("Link", "<${server.url("/page1?rel=next")}>; rel=\"prev\""),
+        )
+        server.enqueue(
+            MockResponse().setBody("""[ { "type": "file", "path": "page2.bin", "size": 20 } ]"""),
+        )
+
+        val manifest = runBlocking { repo.manifest("owner/model") }.getOrThrow()
+
+        assertEquals(
+            "a prev link must never be followed as though it were next",
+            listOf("page1.bin"),
+            manifest.files.map { it.path },
+        )
+        assertEquals("the prev link's own url must never be requested", 1, server.requestCount)
+    }
+
+    /**
      * The next-page URL is chosen by the server — the one request target in this adapter that comes
      * from a response rather than from the caller. Following it as given would let a compromised hub
      * aim the host app's own OkHttpClient at any address it names, an internal one included.

@@ -23,18 +23,6 @@ corrupted file, a re-download — hits the nested-marker check and is refused.
 it; the error message says to remove the directory. Neither HuggingFace nor ModelScope publishes a
 file named `.ferry`.
 
-## The next-page matcher is not anchored to the `rel=` attribute
-
-`NEXT_REL` is matched with `containsMatchIn` against a whole Link segment including its URL, so a
-`prev` link whose own URL carries an ordinary `?rel=next` query parameter is misidentified as the
-next page.
-
-**Bounded by:** the extracted URL still has to clear the scheme+host+port origin check, so this can
-at most cause an out-of-turn same-origin fetch. A hostile same-origin hub already has that capability
-for free by putting a genuine `rel="next"` on any URL it likes, so nothing new is granted.
-
-**Known fix:** anchor the match to a `;`-or-segment-start boundary.
-
 ## A file declared with size 0 is verified by nothing
 
 `RepoDownloader` guards its size check with `remote.sizeBytes > 0` so a hub that omits sizes is not
