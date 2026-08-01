@@ -30,6 +30,12 @@ class EmbeddabilityTest {
         [ { "type": "file", "path": "config.json", "size": ${configBody.length} } ]
     """.trimIndent()
 
+    private val modelScopeListingJson = """
+        { "Code": 200, "Success": true, "Data": { "Files": [
+          { "Path": "config.json", "Type": "blob", "Size": ${configBody.length}, "Sha256": "abc" }
+        ] } }
+    """.trimIndent()
+
     @Before
     fun setUp() {
         server = MockWebServer().apply { start() }
@@ -71,6 +77,35 @@ class EmbeddabilityTest {
         )
         assertTrue(seenByHost.any { it.contains("/tree/main") })
         assertTrue(seenByHost.any { it.contains("/resolve/main/config.json") })
+    }
+
+    /** Same guarantee as above, for the second hub — a distinct adapter, easy to wire in wrong. */
+    @Test
+    fun `every modelscope request goes through the caller's http client`() {
+        val seenByHost = mutableListOf<String>()
+        val hostClient = OkHttpClient.Builder()
+            .addInterceptor(Interceptor { chain ->
+                seenByHost += chain.request().url.encodedPath
+                chain.proceed(chain.request())
+            })
+            .build()
+
+        server.enqueue(MockResponse().setBody(modelScopeListingJson))
+        server.enqueue(MockResponse().setBody(configBody))
+
+        val ferry = Ferry.modelScope(
+            client = hostClient,
+            baseUrl = server.url("/").toString().trimEnd('/'),
+        )
+        runBlocking { ferry.download("owner/model", temp.root) }
+
+        assertEquals(
+            "manifest and file requests must both be visible to the host",
+            2,
+            seenByHost.size,
+        )
+        assertTrue(seenByHost.any { it.endsWith("/repo/files") })
+        assertTrue(seenByHost.any { it.endsWith("/repo") })
     }
 
     /**
