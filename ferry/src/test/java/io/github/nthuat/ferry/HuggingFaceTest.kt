@@ -136,16 +136,62 @@ class HuggingFaceTest {
     }
 
     /**
-     * The repo id is interpolated into a URL that carries a query string, so a delimiter inside it
-     * could reshape the request rather than name a repo — "a/b?recursive=false" would turn recursion
-     * off again. Refused before any request is made.
+     * HuggingFace serves single-segment canonical models with no owner — `gpt2`, `bert-base-uncased`
+     * — alongside `owner/name` ones. `addPathSegments(repoId)` must add exactly one path segment for
+     * these, not drop the id or split on some other character, since there is no `/` to split on.
      */
     @Test
-    fun `a repo id containing a url delimiter is a failure and makes no request`() {
-        val result = runBlocking { repo.manifest("owner/model?recursive=false") }
+    fun `a single-segment canonical repo id produces one path segment, not a split or dropped id`() {
+        server.enqueue(MockResponse().setBody(treeJson))
 
-        assertTrue(result.isFailure)
-        assertEquals(0, server.requestCount)
+        runBlocking { repo.manifest("gpt2") }
+
+        assertEquals(
+            "/api/models/gpt2/tree/main?recursive=true",
+            server.takeRequest().path,
+        )
+    }
+
+    /**
+     * Unlike the denylist this used to be, none of `?`, `#` or `&` is rejected here: `?` and `#`
+     * travel through addPathSegments and come out percent-encoded, and `&` comes out as an inert
+     * literal character — a path segment has no structural meaning for `&` the way a query string
+     * does — rather than any of the three reinterpreting as a query or fragment delimiter (see the
+     * comment on `HuggingFace.manifest` for why no pre-check exists any more). Proven here against the
+     * actual request produced, not by argument — mirrors `ModelScopeTest`'s equivalent test against
+     * the same repoId shape.
+     */
+    @Test
+    fun `a repo id containing url delimiters is percent-encoded rather than reshaping the request`() {
+        server.enqueue(MockResponse().setBody(treeJson))
+
+        val result = runBlocking { repo.manifest("org/name?recursive=false#x&evil=1") }
+
+        assertTrue(
+            "the request must still succeed - the character is encoded, not rejected",
+            result.isSuccess,
+        )
+        val recordedPath = server.takeRequest().path!!
+        assertEquals(
+            "the repoId's own '?' must not open a second, earlier query string",
+            1,
+            recordedPath.count { it == '?' },
+        )
+        assertEquals(
+            "the real query must be exactly recursive=true, unclobbered by the repoId's own ?, & and #",
+            "recursive=true",
+            recordedPath.substringAfter('?'),
+        )
+        assertTrue(
+            "the repoId's '?' must be percent-encoded rather than left as a literal delimiter",
+            recordedPath.contains("name%3Frecursive"),
+        )
+        assertEquals(
+            "the exact request path, proving both the path segment's own encoding and the appended " +
+                "query",
+            "/api/models/org/name%3Frecursive=false%23x&evil=1/tree/main?recursive=true",
+            recordedPath,
+        )
     }
 
     @Test
@@ -157,6 +203,24 @@ class HuggingFaceTest {
 
         assertTrue(
             weights.url.endsWith("/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/model.safetensors"),
+        )
+    }
+
+    /**
+     * `entry.path` for a nested file already contains its own "/" — "onnx/model.onnx", present in
+     * `treeJson` for exactly this reason. `addPathSegments(path)` must split that into two real path
+     * segments the same way it splits `repoId`, not fold it into one opaque, percent-encoded segment
+     * (`onnx%2Fmodel.onnx`), which would 404 against a hub that expects an actual nested path.
+     */
+    @Test
+    fun `a nested file path produces a download url with the nesting preserved as real path segments`() {
+        server.enqueue(MockResponse().setBody(treeJson))
+
+        val manifest = runBlocking { repo.manifest("Qwen/Qwen2.5-0.5B-Instruct") }.getOrThrow()
+        val nested = manifest.files.single { it.path == "onnx/model.onnx" }
+
+        assertTrue(
+            nested.url.endsWith("/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/onnx/model.onnx"),
         )
     }
 

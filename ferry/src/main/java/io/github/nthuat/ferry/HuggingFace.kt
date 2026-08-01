@@ -6,6 +6,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -24,22 +25,40 @@ class HuggingFace(
 ) : ModelRepo {
 
     override suspend fun manifest(repoId: String): Result<RepoManifest> = withContext(dispatcher) {
-        // repoId is interpolated into a URL that now carries a query string, so a repoId containing
-        // a URL delimiter could reshape the request — "a/b?recursive=false#" would silently turn
-        // recursion back off and truncate the repo again. Refused rather than encoded: a repo id is
-        // an owner and a name, and none of these three characters belongs in either.
-        if (repoId.any { it in URL_DELIMITERS }) {
-            return@withContext Result.failure(
-                IOException("repo id must not contain '?', '&' or '#': $repoId"),
-            )
-        }
         try {
+            val base = baseUrl.toHttpUrlOrNull()
+                ?: return@withContext Result.failure(IOException("invalid base URL: $baseUrl"))
+
             val entries = mutableListOf<TreeEntry>()
+            // repoId travels through addPathSegments rather than string interpolation, so a "?" or
+            // "#" inside it is percent-encoded into inert segment text, and a "&" is left as a literal
+            // character that is inert for a different reason: a path segment has no structural meaning
+            // for "&" the way a query string does. None of the three can be reinterpreted as a query
+            // or fragment delimiter — pinned by HuggingFaceTest against the actual request produced,
+            // not just argued for here.
+            //
+            // This replaces what used to be a denylist (URL_DELIMITERS) rejecting those three
+            // characters outright, which named the bad character in the error immediately. That
+            // specificity is a real, deliberate loss, not a free side effect of this conversion: a
+            // malformed id now surfaces only as whatever generic rejection the hub sends back. It is
+            // accepted anyway because a denylist is a claim about which repo ids exist, and the hub
+            // alone is the authority on that — a denylist goes stale the moment the hub widens its own
+            // id rules, and fails closed, rejecting a legitimate id the hub would have served. A
+            // malformed id is a programming error; a generic hub-side rejection is an acceptable
+            // answer for one. See [ModelScope.manifest]'s KDoc, which carries the same reasoning, and
+            // docs/known-limitations.md for the related "..", traversal case this does not change.
+            //
             // recursive=true is not optional. The tree endpoint lists one level by default, so a
             // repo with unet/, vae/ or onnx/ subtrees would list a fraction of its files, download
             // that fraction, and report a complete model — with totalBytes short by the difference,
             // which also makes the free-space precheck under-reserve.
-            var url = "$baseUrl/api/models/$repoId/tree/main?recursive=true"
+            var url = base.newBuilder()
+                .addPathSegments("api/models")
+                .addPathSegments(repoId)
+                .addPathSegments("tree/main")
+                .addQueryParameter("recursive", "true")
+                .build()
+                .toString()
             var pages = 0
 
             // A page caps at 1000 entries and points at the next with a Link header. Recursion made
@@ -71,6 +90,10 @@ class HuggingFace(
                     nextLink(response.headers("Link").joinToString(","))
                 } ?: break
 
+                // Reassigned to the server's own next-page URL as-is, not rebuilt through
+                // HttpUrl.Builder: sameOriginOrNull already proves it parses and shares baseUrl's
+                // origin, and rebuilding a URL the server already encoded would risk re-encoding it —
+                // turning an already-correct URL into a wrong one.
                 url = sameOriginOrNull(next)
                     ?: return@withContext Result.failure(
                         IOException("next page of $repoId is not on $baseUrl: $next"),
@@ -82,7 +105,7 @@ class HuggingFace(
                 .map { entry ->
                     RemoteFile(
                         path = entry.path,
-                        url = "$baseUrl/$repoId/resolve/main/${entry.path}",
+                        url = downloadUrl(base, repoId, entry.path),
                         // The lfs block carries the authoritative size for large files.
                         sizeBytes = entry.lfs?.size ?: entry.size,
                         // lfs.oid is the SHA-256. The sibling top-level `oid` is a git blob
@@ -95,9 +118,18 @@ class HuggingFace(
             Result.failure(e)
         } catch (e: SerializationException) {
             Result.failure(IOException("malformed tree response for $repoId", e))
-        } catch (e: IllegalArgumentException) {
-            Result.failure(IOException("invalid base URL or repo ID", e))
         }
+        // No IllegalArgumentException catch, checked rather than assumed against okhttp 4.12.0's own
+        // source: Request.Builder().url(String) can only throw by calling String.toHttpUrl(), and
+        // every string this method ever hands it has already been proven to parse before it gets
+        // there. The first page's url comes from the HttpUrl.Builder chain above, whose build() throws
+        // only IllegalStateException — and only for a null scheme or host, which cannot happen off a
+        // newBuilder() of the already-validated `base`. Every later page's url is the server's `next`,
+        // but only after sameOriginOrNull has already called url.toHttpUrlOrNull() on that exact
+        // string — which is defined as nothing but a try/catch around toHttpUrl() — so by the time it
+        // reaches Request.Builder().url(...) here it is already proven not to throw. A catch here
+        // would be exactly as dead as ModelScope's own, checked here across both of this file's
+        // request sites (the first page and every following one) rather than the one ModelScope has.
     }
 
     /**
@@ -144,6 +176,22 @@ class HuggingFace(
         }
     }
 
+    /**
+     * Where to fetch [path] from, inside [repoId], at the `main` revision.
+     *
+     * Mirrors [ModelScope]'s private `downloadUrl`: built with [HttpUrl.Builder] rather than
+     * interpolated into a string, so a `?` or `#` in [repoId] or [path] is percent-encoded into inert
+     * segment text, and a `&` is left as a literal character that is inert for a different reason — a
+     * path segment has no structural meaning for `&` the way a query string does. None of the three
+     * can be reinterpreted as a query or fragment delimiter.
+     */
+    private fun downloadUrl(base: HttpUrl, repoId: String, path: String): String = base.newBuilder()
+        .addPathSegments(repoId)
+        .addPathSegments("resolve/main")
+        .addPathSegments(path)
+        .build()
+        .toString()
+
     @Serializable
     private data class TreeEntry(
         val type: String,
@@ -159,9 +207,6 @@ class HuggingFace(
     )
 
     private companion object {
-        /** Characters that would end the path segment and start a query or fragment. */
-        const val URL_DELIMITERS = "?&#"
-
         /**
          * A cursor that points back at its own page would otherwise loop forever. 100 pages is
          * 100,000 entries at the hub's 1000-per-page cap — far beyond any real repository, so this

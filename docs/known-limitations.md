@@ -93,15 +93,20 @@ evidence against one.
 ## A repo id containing `..` can retarget the request to an arbitrary path on the hub's origin
 
 Both `HuggingFace` and `ModelScope` build their listing and download URLs from a caller-supplied
-`repoId`, and OkHttp resolves `.`/`..` path segments the same way during `HttpUrl` string parsing
-(`HuggingFace`) as it does during `HttpUrl.Builder.addPathSegments` (`ModelScope`). A `repoId` of
+`repoId` via `HttpUrl.Builder.addPathSegments`, which resolves a `.` or `..` path segment by popping
+the segment before it rather than rejecting it or encoding it as literal text. A `repoId` of
 `"../../etc/passwd"` pops `api/models` or `api/v1/models` off the path entirely, retargeting the
 request to `{baseUrl}/etc/passwd/...` instead of failing or staying inside the models namespace.
 
 **Condition:** a `repoId` containing `..` segments, from any caller of either adapter. This predates
-ModelScope — `HuggingFace` has always canonicalized `..` this way during its own URL parsing — and
-affects both adapters equally; `ModelScope`'s `HttpUrl.Builder`-based construction neither introduces
-nor worsens it relative to `HuggingFace`'s string interpolation.
+ModelScope — `HuggingFace` originally built this URL by string interpolation, parsed afterward by
+`HttpUrl`'s own string parser, which collapses `.`/`..` through the same segment-popping logic
+(`Builder.push`, reached via `resolvePath`) that `addPathSegments` also calls. `HuggingFace`'s later
+conversion to build this URL through `addPathSegments` — the same mechanism `ModelScope` already
+used — changes the code path but not the outcome: confirmed directly against okhttp 4.12.0's source
+that both forms resolve `..` identically. It affects all of string-interpolated `HuggingFace`,
+converted `HuggingFace`, and `ModelScope` equally; none of the three introduces or worsens it relative
+to either other.
 
 **Consequence:** bounded to the hub's own origin — this cannot redirect the request to a different
 host, only to a different path on the one the caller already configured as `baseUrl`, so it is not a
@@ -110,9 +115,11 @@ the caller itself) can aim a `GET` at any path under that origin, not only ones 
 namespace.
 
 **Not fixed here:** no `repoId`-shape check was added for this, or for `?`/`&`/`#` (see
-`ModelScope.manifest`'s KDoc). Both fall out of the same reasoning: a client-side shape check on repo
-ids is a denylist, and the hub alone is the authority on which ids are valid — a denylist goes stale
-the moment the hub's own id rules change, and fails closed on a legitimate id rather than deferring to
-the hub that actually knows. `..` is not a separate, narrower case; it is the same problem, made
-acceptable to defer specifically because the traversal it enables is bounded to the hub's own origin
+`ModelScope.manifest`'s KDoc, and `HuggingFace.manifest`'s own comment, which picked up the same
+reasoning when it made the same conversion). Both fall out of the same reasoning: a client-side shape
+check on repo ids is a denylist, and the hub alone is the authority on which ids are valid — a
+denylist goes stale the moment the hub's own id rules change, and fails closed on a legitimate id
+rather than deferring to the hub that actually knows. `..` is not a separate, narrower case; it is the
+same problem, made acceptable to defer specifically because the traversal it enables is bounded to
+the hub's own origin
 rather than reaching anywhere else.

@@ -116,11 +116,30 @@ class ModelScopeTest {
     }
 
     /**
-     * Unlike HuggingFace, a delimiter character here is not rejected: it travels through
-     * addPathSegments, which percent-encodes it into inert path-segment text instead of letting it
-     * reinterpret as a query or fragment delimiter (see the KDoc on `ModelScope.manifest` for why no
-     * pre-check exists). Proven here against the actual request produced, not by argument — this is
-     * the same repoId shape HuggingFaceTest rejects outright; this adapter instead sends it safely.
+     * `addPathSegments(repoId)` must add exactly one path segment when repoId has no `/` to split
+     * on, not drop it or split on some other character — this code never assumes two segments, and
+     * `HuggingFaceTest` pins the equivalent for the same reason.
+     */
+    @Test
+    fun `a single-segment repo id produces one path segment, not a split or dropped id`() {
+        server.enqueue(MockResponse().setBody(listingJson))
+
+        runBlocking { repo.manifest("bert-base-uncased") }
+
+        assertEquals(
+            "/api/v1/models/bert-base-uncased/repo/files?Revision=master&Recursive=True",
+            server.takeRequest().path,
+        )
+    }
+
+    /**
+     * Unlike HuggingFace's old denylist, none of `?`, `#` or `&` is rejected here: `?` and `#` travel
+     * through addPathSegments and come out percent-encoded, and `&` comes out as an inert literal
+     * character — a path segment has no structural meaning for `&` the way a query string does —
+     * rather than any of the three reinterpreting as a query or fragment delimiter (see the KDoc on
+     * `ModelScope.manifest` for why no pre-check exists). Proven here against the actual request
+     * produced, not by argument — this is the same repoId shape `HuggingFaceTest`'s equivalent test
+     * exercises; both adapters now send it safely.
      */
     @Test
     fun `a repo id containing url delimiters is percent-encoded rather than reshaping the request`() {
@@ -198,6 +217,28 @@ class ModelScopeTest {
         assertEquals(listOf("api", "v1", "models", "owner", "model", "repo"), url.pathSegments)
         assertEquals("master", url.queryParameter("Revision"))
         assertEquals("config.json", url.queryParameter("FilePath"))
+    }
+
+    /**
+     * Unlike HuggingFace, a nested file's own "/" travels through a query parameter here
+     * (`FilePath`), not a path segment, so okhttp is free to leave it literal or percent-encode it —
+     * a `/` has no structural meaning inside a query value either way. What actually matters is the
+     * round trip, not the encoding choice: `queryParameter("FilePath")` must hand back the exact
+     * original nested path, not truncate at the first `/` or come back mangled. Asserted against the
+     * contract, not a specific encoding, using the nested blob already in `listingJson`
+     * (`text_encoder_2/config.json`).
+     */
+    @Test
+    fun `a nested file path round-trips through the FilePath query parameter unmangled`() {
+        server.enqueue(MockResponse().setBody(listingJson))
+
+        val manifest = runBlocking { repo.manifest("owner/model") }.getOrThrow()
+        val nested = manifest.files.single { it.path == "text_encoder_2/config.json" }
+
+        assertEquals(
+            "text_encoder_2/config.json",
+            nested.url.toHttpUrl().queryParameter("FilePath"),
+        )
     }
 
     @Test
