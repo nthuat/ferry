@@ -89,3 +89,29 @@ silently missing the entries past the cap, downloaded, verified and committed as
 with no error at any layer. A repo of that size would settle the question either way: a truncated
 `files` list confirms a cap, and a complete one across a genuinely large repo would be the first real
 evidence against one.
+
+## A repo id containing `..` can retarget the request to an arbitrary path on the hub's origin
+
+Both `HuggingFace` and `ModelScope` build their listing and download URLs from a caller-supplied
+`repoId`, and OkHttp resolves `.`/`..` path segments the same way during `HttpUrl` string parsing
+(`HuggingFace`) as it does during `HttpUrl.Builder.addPathSegments` (`ModelScope`). A `repoId` of
+`"../../etc/passwd"` pops `api/models` or `api/v1/models` off the path entirely, retargeting the
+request to `{baseUrl}/etc/passwd/...` instead of failing or staying inside the models namespace.
+
+**Condition:** a `repoId` containing `..` segments, from any caller of either adapter. This predates
+ModelScope — `HuggingFace` has always canonicalized `..` this way during its own URL parsing — and
+affects both adapters equally; `ModelScope`'s `HttpUrl.Builder`-based construction neither introduces
+nor worsens it relative to `HuggingFace`'s string interpolation.
+
+**Consequence:** bounded to the hub's own origin — this cannot redirect the request to a different
+host, only to a different path on the one the caller already configured as `baseUrl`, so it is not a
+same-origin escalation. It does mean a caller (or a `repoId` sourced from somewhere less trusted than
+the caller itself) can aim a `GET` at any path under that origin, not only ones inside the models
+namespace.
+
+**Not fixed here:** no `repoId`-shape check was added for this. `ModelScope.manifest`'s KDoc records
+the same choice for `?`/`&`/`#` — a malformed id is deliberately left for the hub to reject, because
+the alternative would cost the delimiter-encoding property its only test (see `ModelScopeTest`'s
+`a repo id containing url delimiters …` test and the reasoning above it). A future `repoId`-shape
+check that rejects `..` segments — a separate, narrower check than the delimiter one, since it would
+not have that same conflict — would close this for both adapters at once.
