@@ -194,6 +194,64 @@ class RepoDownloaderTest {
         )
     }
 
+    /**
+     * The fix for docs/known-limitations.md's "a file declared with size 0 is verified by nothing":
+     * the post-download check used to skip entirely when remote.sizeBytes was 0, while isSatisfiedBy
+     * (no such guard) always compared onDisk.length() == remote.sizeBytes unconditionally — so the
+     * two disagreed on a hub declaring an explicit zero. Both now apply the same unconditional
+     * equality, so a genuinely empty declared-0 file is verified (trivially, by matching) on the
+     * fresh-download path and stays a stable hit on the cache-check path, rather than the two ever
+     * disagreeing about the same file.
+     */
+    @Test
+    fun `a file declared size 0 that is genuinely empty is a stable cache hit`() {
+        val files = listOf(remote("empty.bin", 0L))
+        server.enqueue(MockResponse().setBody(""))
+
+        val first = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+        val requestsAfterFirst = server.requestCount
+
+        val second = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+
+        assertEquals(0L, File(first, "empty.bin").length())
+        assertEquals(first, second)
+        assertEquals(
+            "a genuinely empty declared-0 file must be a stable cache hit, not re-downloaded",
+            requestsAfterFirst,
+            server.requestCount,
+        )
+    }
+
+    /**
+     * The consequence docs/known-limitations.md named for the asymmetry this fix closes: a hub
+     * declaring size 0 while actually serving a non-empty body used to be accepted at download time
+     * (the guard skipped the check) and then fail isSatisfiedBy forever after (which never had the
+     * guard) — committed once, then silently re-downloaded and re-committed on every subsequent
+     * call, never a hit and never failing loudly either. Dropping the download-time guard instead
+     * fails the very first attempt, cleanly and repeatably, rather than committing something that
+     * can never satisfy its own manifest.
+     */
+    @Test
+    fun `a file declared size 0 with a non-empty body fails cleanly instead of looping forever`() {
+        val files = listOf(remote("empty.bin", 0L))
+        server.enqueue(MockResponse().setBody(weightsBody))
+
+        val first = runBlocking { downloaderFor(files).download("a/b", temp.root) }
+
+        assertTrue(first.isFailure)
+        assertTrue(first.exceptionOrNull() is VerificationException)
+        assertFalse(
+            "a size-0 mismatch must not commit a directory that can never satisfy its own manifest",
+            File(temp.root, "a/b").exists(),
+        )
+
+        server.enqueue(MockResponse().setBody(weightsBody))
+        val second = runBlocking { downloaderFor(files).download("a/b", temp.root) }
+
+        assertTrue("must fail the same way every time, not loop into some other state", second.isFailure)
+        assertTrue(second.exceptionOrNull() is VerificationException)
+    }
+
     @Test
     fun `files without a published hash are accepted`() {
         val files = listOf(remote("config.json", configBody.length.toLong()))

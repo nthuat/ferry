@@ -186,9 +186,21 @@ class RepoDownloader(
                 // — a captive portal's login page, a hub serving an error document with a correct
                 // Content-Length — satisfies it at any size. This is the only place the manifest's
                 // figure is ever consulted, and for a file the hub published no sha256 for it is
-                // the whole of the verification. Skipped when the hub omits the size, which leaves
-                // such a hub exactly where it was rather than failing every file.
-                if (remote.sizeBytes > 0 && destination.length() != remote.sizeBytes) {
+                // the whole of the verification.
+                //
+                // Unconditional, not guarded on `remote.sizeBytes > 0` as this once was: that guard
+                // treated a declared 0 as "unknown, skip the check", but isSatisfiedBy below has never
+                // had a matching guard — it compares onDisk.length() == remote.sizeBytes unconditionally
+                // — so the two disagreed. A hub declaring an explicit 0 could pass a non-empty body
+                // here and then fail isSatisfiedBy on every later call forever: committed once, never a
+                // cache hit again (docs/known-limitations.md's closed entry on this). Dropping the guard
+                // here instead treats a declared 0 the same way isSatisfiedBy always has: a real
+                // assertion that the file is empty, checked, not an "unknown size" sentinel skipped.
+                // Neither HuggingFace nor ModelScope was ever observed omitting a real file's size this
+                // way — both always publish an explicit figure for a "file"/"blob" entry — so this
+                // costs neither adapter anything today; it only stops trusting a hub that starts
+                // publishing a real, checkable zero.
+                if (destination.length() != remote.sizeBytes) {
                     return@withContext Result.failure(
                         VerificationException(
                             remote.path,
@@ -276,6 +288,14 @@ class RepoDownloader(
      *
      * Deliberately re-hashes rather than trusting a marker file: a marker records what was true
      * once, and the point of the check is what is true now.
+     *
+     * `onDisk.length() == remote.sizeBytes` is unconditional — including when `remote.sizeBytes` is
+     * 0 — and always has been. The post-download check in `download()` above now matches it exactly,
+     * for the same reason: the two used to disagree (that check skipped entirely on a declared 0),
+     * which let a hub declaring an explicit zero pass a non-empty body on download and then fail
+     * this check on every later call forever. A declared 0 is treated as a real, checked assertion
+     * that the file is empty in both places now, not "unknown, don't check" in one and enforced in
+     * the other.
      */
     private fun RepoManifest.isSatisfiedBy(dir: File): Boolean = files.all { remote ->
         val onDisk = resolveInside(dir, remote.path)

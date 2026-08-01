@@ -23,14 +23,32 @@ corrupted file, a re-download — hits the nested-marker check and is refused.
 it; the error message names the offending `.ferry` file and says to remove it first. Neither
 HuggingFace nor ModelScope publishes a file named `.ferry`.
 
-## A file declared with size 0 is verified by nothing
+## Closed: a file declared with size 0 was verified by nothing
 
-`RepoDownloader` guards its size check with `remote.sizeBytes > 0` so a hub that omits sizes is not
-broken by it. `isSatisfiedBy` has no such guard. Two consequences for a hub that publishes an explicit
-zero: a non-empty body is accepted on download and then cache-misses forever, and a genuinely empty
-file with no published `sha256` is committed unverified.
+Was: `RepoDownloader`'s post-download check guarded on `remote.sizeBytes > 0`, so a hub that omits
+sizes would not be broken by it. `isSatisfiedBy` (the cache-hit check) had no such guard — it compared
+`onDisk.length() == remote.sizeBytes` unconditionally. Two consequences for a hub publishing an
+explicit zero: a non-empty body was accepted at download time and then cache-missed forever, since
+`isSatisfiedBy` would never agree it matched; and a genuinely empty file with no published `sha256`
+was committed having been checked by neither path.
 
-Neither HuggingFace nor ModelScope publishes zero sizes for real files.
+**Closed by making the two agree, in the restrictive direction.** The post-download check in
+`download()` dropped the `remote.sizeBytes > 0` guard, so it now compares
+`destination.length() != remote.sizeBytes` unconditionally — exactly matching `isSatisfiedBy`, which
+never had the guard to begin with. A declared 0 is now a real, checked assertion that the file is
+empty in both places, not "unknown, skip the check" in one and enforced in the other.
+
+The other direction considered — adding the `> 0` guard to `isSatisfiedBy` too, so a declared 0 means
+"unknown" everywhere — was not taken. It is not restrictive: it would make `isSatisfiedBy` accept a
+case it currently rejects (any on-disk length, once `remote.sizeBytes` is 0), which is the same shape
+of change (broadening what an existing check accepts) that produced two of the defects this file
+documents. Dropping the download-time guard instead only makes that check reject a case it used to
+silently accept — a non-empty body against a declared 0 — which is the opposite direction and costs
+nothing observable: neither `HuggingFace` nor `ModelScope` was ever seen omitting a real file's size
+this way (both always publish an explicit figure for a `"file"`/`"blob"` entry; the `= 0` Kotlin
+default in each adapter's parsed entry type only lands on the `"directory"`/`"tree"` entries that are
+filtered out before becoming a `RemoteFile`), so this closes a real gap for a hub that starts
+publishing a genuine zero without changing behavior for either hub in production today.
 
 ## Resume does not survive the process
 
