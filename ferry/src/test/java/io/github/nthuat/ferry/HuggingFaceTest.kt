@@ -208,6 +208,75 @@ class HuggingFaceTest {
         assertEquals("the off-host page must never be requested", 1, server.requestCount)
     }
 
+    /**
+     * Repeated `Link:` fields are equivalent to one comma-joined field (RFC 7230 3.2.2), so a
+     * response is free to split next and prev across two of them.
+     *
+     * The ordering here is load-bearing and not arbitrary: OkHttp's `Headers.get` scans backwards
+     * and returns the *last* matching field, so `next` is sent first and `prev` second. Reversed,
+     * a single-field read would happen to pick the next link up and this test would pass against
+     * the very code it exists to fail.
+     */
+    @Test
+    fun `a next link split across repeated Link fields still paginates`() {
+        server.enqueue(
+            MockResponse()
+                .setBody("""[ { "type": "file", "path": "page1.bin", "size": 10 } ]""")
+                .addHeader("Link", "<${server.url("/page2")}>; rel=\"next\"")
+                .addHeader("Link", "<${server.url("/prev")}>; rel=\"prev\""),
+        )
+        server.enqueue(
+            MockResponse().setBody("""[ { "type": "file", "path": "page2.bin", "size": 32 } ]"""),
+        )
+
+        val manifest = runBlocking { repo.manifest("owner/model") }.getOrThrow()
+
+        assertEquals(listOf("page1.bin", "page2.bin"), manifest.files.map { it.path })
+    }
+
+    /** RFC 8288 permits an unquoted rel. Reading it as "last page" is a silent truncation. */
+    @Test
+    fun `an unquoted rel next still paginates`() {
+        server.enqueue(
+            MockResponse()
+                .setBody("""[ { "type": "file", "path": "page1.bin", "size": 10 } ]""")
+                .addHeader("Link", "<${server.url("/page2")}>; rel=next"),
+        )
+        server.enqueue(
+            MockResponse().setBody("""[ { "type": "file", "path": "page2.bin", "size": 32 } ]"""),
+        )
+
+        val manifest = runBlocking { repo.manifest("owner/model") }.getOrThrow()
+
+        assertEquals(listOf("page1.bin", "page2.bin"), manifest.files.map { it.path })
+    }
+
+    /**
+     * Same host, different port. Harmless against the default huggingface.co, but a baseUrl with an
+     * explicit port — a self-hosted mirror — would otherwise follow a next link to any port on that
+     * machine. The other server is real and holds an enqueued page, so removing the guard fetches
+     * it and the request count says so, rather than the test passing on a refused connection.
+     */
+    @Test
+    fun `a next page url on another port is refused and never requested`() {
+        val otherPort = MockWebServer().apply { start() }
+        try {
+            otherPort.enqueue(MockResponse().setBody(treeJson))
+            server.enqueue(
+                MockResponse()
+                    .setBody(treeJson)
+                    .addHeader("Link", "<${otherPort.url("/page2")}>; rel=\"next\""),
+            )
+
+            val result = runBlocking { repo.manifest("owner/model") }
+
+            assertTrue(result.isFailure)
+            assertEquals("the off-port page must never be requested", 0, otherPort.requestCount)
+        } finally {
+            otherPort.shutdown()
+        }
+    }
+
     /** A cursor pointing back at its own page would otherwise loop until the process died. */
     @Test
     fun `a listing whose cursor never ends fails at the page cap`() {

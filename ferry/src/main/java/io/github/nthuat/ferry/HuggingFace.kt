@@ -63,7 +63,12 @@ class HuggingFace(
                             IOException("empty tree response for $repoId"),
                         )
                     entries += json.decodeFromString<List<TreeEntry>>(body)
-                    response.header("Link")?.let { nextLink(it) }
+                    // headers(), not header(): the latter returns one field value, and repeated
+                    // Link: fields are equivalent to one comma-joined field (RFC 7230 3.2.2). A
+                    // response splitting next and prev across two fields would otherwise yield
+                    // whichever one header() picked, and a prev link ends the loop — the same
+                    // silent truncation, arriving from a hub-side change with no deploy here.
+                    nextLink(response.headers("Link").joinToString(","))
                 } ?: break
 
                 url = sameOriginOrNull(next)
@@ -99,29 +104,39 @@ class HuggingFace(
      * The `next` URL out of a `Link` header, or null when this was the last page.
      *
      * The format is `<url>; rel="next"` and a response may carry several, comma separated — so the
-     * rel is selected on rather than assumed to be the only one or the first. Only the quoted form
-     * is recognised, which is what the hub sends; anything else is treated as "no next page", and a
-     * listing that is short is caught by the size and hash checks downstream rather than here.
+     * rel is selected on rather than assumed to be the only one or the first.
+     *
+     * Anything unrecognised here reads as "last page", which is a silent truncation: nothing
+     * downstream can catch it, because a file missing from the manifest is a file `RepoDownloader`
+     * never iterates, never downloads and never checks. Accepting both the quoted and the unquoted
+     * rel, and reading repeated header fields at the call site, is what keeps that unreachable
+     * against a hub that changes its header formatting.
      */
     private fun nextLink(header: String): String? = header.split(',')
-        .firstOrNull { it.contains("rel=\"next\"") }
+        .firstOrNull { NEXT_REL.containsMatchIn(it) }
         ?.substringAfter('<', "")
         ?.substringBefore('>', "")
         ?.trim()
         ?.takeIf { it.isNotEmpty() }
 
     /**
-     * [url] if it is on the same scheme and host as [baseUrl], null otherwise.
+     * [url] if it is on the same origin as [baseUrl] — scheme, host and port — null otherwise.
      *
      * The next-page URL is chosen by the server, so following it as given would let a hostile or
      * compromised hub aim this client — carrying whatever the host app's OkHttpClient carries — at
      * any address it names, an internal one included. Pagination is the one place in this adapter
      * where a request target comes from the response rather than from the caller.
+     *
+     * The port is part of that. Against the default huggingface.co it adds nothing, but a baseUrl
+     * with an explicit port — a self-hosted mirror, a dev configuration — otherwise lets a next link
+     * of `http://<same host>:22/…` through. No hub pages on a different port than it lists on.
      */
     private fun sameOriginOrNull(url: String): String? {
         val base = baseUrl.toHttpUrlOrNull() ?: return null
         val next = url.toHttpUrlOrNull() ?: return null
-        return url.takeIf { next.scheme == base.scheme && next.host == base.host }
+        return url.takeIf {
+            next.scheme == base.scheme && next.host == base.host && next.port == base.port
+        }
     }
 
     @Serializable
@@ -148,6 +163,12 @@ class HuggingFace(
          * can only be reached by a server that is broken or hostile.
          */
         const val MAX_PAGES = 100
+
+        /**
+         * `rel="next"`, or the unquoted `rel=next` that RFC 8288 also permits. The trailing
+         * lookahead is what stops this matching `rel=nextpage`.
+         */
+        val NEXT_REL = Regex("""rel="?next"?(?![\w-])""")
 
         /**
          * ignoreUnknownKeys is load-bearing, not hygiene. HuggingFace adds fields to this response
