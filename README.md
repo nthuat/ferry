@@ -2,9 +2,9 @@
 
 Downloads AI model repositories to Android devices, and refuses to do it badly.
 
-> **Status: core works.** Fetches a HuggingFace repo, refuses to start without the disk space to
-> finish it, and verifies every published SHA-256 before committing anything. Backgrounding, pause,
-> resume-across-launch and a second hub are not done. Not published to Maven.
+> **Status: core works.** Fetches a HuggingFace or ModelScope repo, refuses to start without the disk
+> space to finish it, and verifies every published SHA-256 before committing anything. Backgrounding,
+> pause and resume-across-launch are not done. Not published to Maven.
 
 ```kotlin
 val ferry = Ferry.huggingFace()
@@ -156,11 +156,11 @@ right for every hub, including ones nobody has written an adapter for yet.
 
 ### What three hubs look like
 
-HuggingFace is implemented. The other two are checked against their live APIs, not adapted yet.
+HuggingFace and ModelScope are implemented. Ollama is checked against its live API, not adapted yet.
 
 | | HuggingFace | ModelScope | Ollama |
 |---|---|---|---|
-| Listing | `/api/models/{id}/tree/main?recursive=true` | `/api/v1/models/{id}/repo/files?Revision=master` | `/v2/library/{id}/manifests/{tag}` |
+| Listing | `/api/models/{id}/tree/main?recursive=true` | `/api/v1/models/{id}/repo/files?Revision=master&Recursive=True` | `/v2/library/{id}/manifests/{tag}` |
 | Auth to list | none | none | none |
 | File identity | `path` | `Path` | **none — digest only** |
 | File type field | `type == "file"` | `Type == "blob"` | every layer is a file |
@@ -169,6 +169,12 @@ HuggingFace is implemented. The other two are checked against their live APIs, n
 | Range response | `206` | **`200`** with `Content-Range` | `206` |
 | Default revision | `main` | `master` | a tag, e.g. `0.5b` |
 
+**`Recursive` is case-sensitive, and the wrong case is silently ignored rather than rejected —
+verified live: `Recursive=True` returned 39 entries (21 nested); `recursive=true` returned 18 with
+none nested, HTTP 200 either way, no error.** Copy the capital R and capital T exactly — a lowercase
+typo here is the same silent truncation `recursive=true` on HuggingFace's `/tree/main` used to
+produce, just spelled differently.
+
 ### Which hubs this will actually ship
 
 Two, deliberately.
@@ -176,7 +182,7 @@ Two, deliberately.
 | Hub | Status |
 |---|---|
 | HuggingFace | implemented |
-| ModelScope | planned — API verified live |
+| ModelScope | implemented |
 | Ollama | deferred — adapter is straightforward, but its converted GGUFs share no hashes with the others, so it adds surface without compounding |
 | Modelers.cn | **documented, not implemented** — unreachable from where this was written, and an adapter whose only evidence is reading someone else's source is exactly what this project keeps proving to be insufficient |
 | Kaggle Models | no — `403` unauthenticated, needs API-key handling first |

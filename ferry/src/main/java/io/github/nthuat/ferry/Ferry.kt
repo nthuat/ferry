@@ -21,4 +21,13 @@ object Ferry {
         repo = HuggingFace(client = client, baseUrl = baseUrl),
         downloader = ResumableDownloader(client),
     )
+
+    fun modelScope(
+        client: OkHttpClient = OkHttpClient(),
+        baseUrl: String = "https://modelscope.cn",
+        revision: String = "master",
+    ): RepoDownloader = RepoDownloader(
+        repo = ModelScope(client = client, baseUrl = baseUrl, revision = revision),
+        downloader = ResumableDownloader(client),
+    )
 }
