@@ -24,11 +24,34 @@ fun interface FreeSpaceProbe {
 }
 
 /**
+ * The nearest ancestor of [dir] that already exists on disk — [dir] itself, if it already does.
+ *
+ * `File.usableSpace` returns 0 — not an exception, a silent, plausible-looking zero — for a path
+ * that does not exist, and a directory not existing yet is the ordinary case for a first-ever
+ * download, not an edge case. Free space is a property of the volume a path sits on, not of one
+ * specific directory on it, so probing the nearest real ancestor answers the same question probing
+ * [dir] itself would, without needing [dir] to exist first, and without creating it just to ask.
+ * Imperfect only across a mount-point boundary between the ancestor and wherever [dir] would
+ * actually be created — not a concern for a single-volume app-private directory tree, which is the
+ * only place this library runs (see docs/known-limitations.md). Falls back to [dir] itself if
+ * nothing above it exists either, so this is never worse than probing [dir] directly would have been.
+ */
+private fun nearestExistingAncestor(dir: File): File =
+    generateSequence(dir) { it.parentFile }.firstOrNull { it.exists() } ?: dir
+
+/**
  * `usableSpace` works on Android and on the JVM. Android's StatFs reports the same number and is
  * deliberately avoided: depending on it would make every caller of this class need an instrumented
  * test to exercise a branch of arithmetic.
+ *
+ * Probes [nearestExistingAncestor], not `dir` directly — see that function's own doc for why. Fixed
+ * here rather than in a caller: this is the one place "measure this directory's free space" is
+ * actually implemented, so any caller of the default probe is covered, not only `RepoDownloader`.
+ * `SpaceCheck` is public, exported on the `api` configuration, and a direct `SpaceCheck().check(...)`
+ * preflight call is exactly the kind of use this library expects — the same phantom zero would have
+ * hit it too had this stayed a `RepoDownloader`-only fix.
  */
-val DefaultFreeSpaceProbe = FreeSpaceProbe { dir -> dir.usableSpace }
+val DefaultFreeSpaceProbe = FreeSpaceProbe { dir -> nearestExistingAncestor(dir).usableSpace }
 
 /**
  * Guarantee 3 — never start what cannot finish.

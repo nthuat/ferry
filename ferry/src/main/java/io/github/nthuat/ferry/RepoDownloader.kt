@@ -84,8 +84,6 @@ class RepoDownloader(
         into: File,
         onProgress: (RepoProgress) -> Unit = {},
     ): Result<File> = withContext(dispatcher) {
-        onProgress(RepoProgress.CheckingSpace(repoId))
-
         val manifest = repo.manifest(repoId).getOrElse { return@withContext Result.failure(it) }
 
         // An empty manifest is a listing that failed without saying so — a hub answering 200 with
@@ -96,13 +94,6 @@ class RepoDownloader(
         // only its own marker. Both are permanent cache hits that no later call can repair.
         if (manifest.files.isEmpty()) {
             return@withContext Result.failure(IOException("no files listed for $repoId"))
-        }
-
-        // Before the first byte: spending a user's data allowance to discover the disk is full is
-        // the failure this library exists to prevent.
-        val report = spaceCheck.check(manifest, into)
-        if (!report.sufficient) {
-            return@withContext Result.failure(InsufficientSpaceException(report))
         }
 
         var staging: File? = null
@@ -136,9 +127,32 @@ class RepoDownloader(
             // Inside the try: isSatisfiedBy re-hashes existing files, which is I/O and can throw
             // the same way every other read in this method can, and must become Result.failure
             // rather than escape the public boundary.
+            //
+            // Checked before free space, not after: a repo already present and verified needs no
+            // space at all, and must not be refused because the device that already holds it has
+            // since filled up. Nothing above this line writes anything, so a hit is returned here
+            // having touched the filesystem only to read it.
             if (target.isDirectory && manifest.isSatisfiedBy(target)) {
                 onProgress(RepoProgress.Complete(repoId, target))
                 return@withContext Result.success(target)
+            }
+
+            // Before the first byte: spending a user's data allowance to discover the disk is full
+            // is the failure this library exists to prevent. Run from inside the try, same as the
+            // cache-hit check above it: a probe is caller-supplied and free to throw, and that
+            // failure must become Result.failure like every other I/O in this method, not escape
+            // the public boundary.
+            //
+            // into may not exist yet — a clean install's first-ever download into a fresh directory
+            // is the ordinary case, not an edge case — and passed straight through to whichever
+            // FreeSpaceProbe the caller configured. Handling that is SpaceCheck's default probe's own
+            // job (see DefaultFreeSpaceProbe's doc in SpaceCheck.kt), not this call site's: fixing it
+            // here would only protect callers who go through RepoDownloader, and SpaceCheck is public,
+            // usable directly for a preflight check without ever calling download() at all.
+            onProgress(RepoProgress.CheckingSpace(repoId))
+            val report = spaceCheck.check(manifest, into)
+            if (!report.sufficient) {
+                return@withContext Result.failure(InsufficientSpaceException(report))
             }
 
             stagingDir.mkdirs()
