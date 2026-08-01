@@ -62,6 +62,17 @@ val architectureDictatingDependencies = listOf(
     "io.insert-koin",
 )
 
+/**
+ * OkHttpClient and CoroutineDispatcher must stay on the api configuration: they are in the
+ * signatures of Ferry.huggingFace, HuggingFace and ResumableDownloader, and on implementation a
+ * consumer could not pass its own client or dispatcher at all — the whole point of taking them as
+ * constructor parameters. See EmbeddabilityTest.
+ */
+val apiDependenciesThatMustStayApi = listOf(
+    "com.squareup.okhttp3:okhttp",
+    "org.jetbrains.kotlinx:kotlinx-coroutines-android",
+)
+
 tasks.register("checkEmbeddable") {
     group = "verification"
     description = "Fails if Ferry gained a dependency that dictates how a host app is built."
@@ -78,6 +89,22 @@ tasks.register("checkEmbeddable") {
 
         require(offenders.isEmpty()) {
             "Ferry must not depend on these — they dictate the host's architecture: $offenders"
+        }
+
+        // EmbeddabilityTest cannot catch a regression that moves these back to implementation: it
+        // compiles against this module's source, where both configurations put OkHttpClient and
+        // CoroutineDispatcher on the compile classpath the same way, so it would pass either way.
+        // Proving it for real needs a consumer project built against the published artifact, and
+        // nothing is published yet — this checks the one thing that is cheap to check from inside
+        // the module: that the declared configuration is still api, not just that the types resolve.
+        val apiDependencyIds = configurations.getByName("api").allDependencies
+            .map { "${it.group}:${it.name}" }
+        val missingFromApi = apiDependenciesThatMustStayApi.filterNot { it in apiDependencyIds }
+
+        require(missingFromApi.isEmpty()) {
+            "These must be declared with api(...), not implementation(...): $missingFromApi — " +
+                "OkHttpClient and CoroutineDispatcher are in Ferry's public constructors, and a " +
+                "consumer can only supply its own if these types are on its compile classpath too."
         }
     }
 }
