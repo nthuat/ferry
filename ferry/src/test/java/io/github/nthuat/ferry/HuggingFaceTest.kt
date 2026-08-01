@@ -136,16 +136,44 @@ class HuggingFaceTest {
     }
 
     /**
-     * The repo id is interpolated into a URL that carries a query string, so a delimiter inside it
-     * could reshape the request rather than name a repo — "a/b?recursive=false" would turn recursion
-     * off again. Refused before any request is made.
+     * Unlike the denylist this used to be, a delimiter character here is not rejected: it travels
+     * through addPathSegments, which percent-encodes it into inert path-segment text instead of
+     * letting it reinterpret as a query or fragment delimiter (see the comment on
+     * `HuggingFace.manifest` for why no pre-check exists any more). Proven here against the actual
+     * request produced, not by argument — mirrors `ModelScopeTest`'s equivalent test against the same
+     * repoId shape.
      */
     @Test
-    fun `a repo id containing a url delimiter is a failure and makes no request`() {
-        val result = runBlocking { repo.manifest("owner/model?recursive=false") }
+    fun `a repo id containing url delimiters is percent-encoded rather than reshaping the request`() {
+        server.enqueue(MockResponse().setBody(treeJson))
 
-        assertTrue(result.isFailure)
-        assertEquals(0, server.requestCount)
+        val result = runBlocking { repo.manifest("org/name?recursive=false#x&evil=1") }
+
+        assertTrue(
+            "the request must still succeed - the character is encoded, not rejected",
+            result.isSuccess,
+        )
+        val recordedPath = server.takeRequest().path!!
+        assertEquals(
+            "the repoId's own '?' must not open a second, earlier query string",
+            1,
+            recordedPath.count { it == '?' },
+        )
+        assertEquals(
+            "the real query must be exactly recursive=true, unclobbered by the repoId's own ?, & and #",
+            "recursive=true",
+            recordedPath.substringAfter('?'),
+        )
+        assertTrue(
+            "the repoId's '?' must be percent-encoded rather than left as a literal delimiter",
+            recordedPath.contains("name%3Frecursive"),
+        )
+        assertEquals(
+            "the exact request path, proving both the path segment's own encoding and the appended " +
+                "query",
+            "/api/models/org/name%3Frecursive=false%23x&evil=1/tree/main?recursive=true",
+            recordedPath,
+        )
     }
 
     @Test

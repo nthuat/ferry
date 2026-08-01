@@ -42,10 +42,11 @@ class ModelScope(
             // repoId travels through addPathSegments rather than string interpolation, so a "?", "#"
             // or "&" inside it is percent-encoded as ordinary segment text instead of being
             // reinterpreted as a query or fragment delimiter — pinned by ModelScopeTest against the
-            // actual request produced, not just argued for here. HuggingFace builds its URL by
-            // string interpolation and has to reject those characters up front for exactly this
-            // reason (see its URL_DELIMITERS); building through the typed API here removes the need
-            // for an equivalent guard rather than duplicating it.
+            // actual request produced, not just argued for here. HuggingFace originally built its URL
+            // by string interpolation and had to reject those characters up front with a denylist for
+            // exactly this reason; it has since converted to this same typed-API approach and dropped
+            // that denylist (see HuggingFace.manifest's own comment for that history), rather than
+            // this file duplicating an equivalent guard.
             //
             // A malformed id is left for the hub itself to reject, rather than pre-checked here. A
             // client-side shape check on repo ids is a denylist, and the hub alone is the authority
