@@ -59,9 +59,30 @@ failure can never leave a half-repo behind, which forfeits the partial files wit
 attempt therefore restarts from byte zero. Making both true at once needs persisted state and is a
 later phase.
 
-## Two things about HuggingFace worth knowing
+## Three things about HuggingFace worth knowing
 
-Both verified against the live API, and both cost you a day if you meet them by surprise.
+All verified against the live API, and each costs you a day if you meet it by surprise.
+
+### The listing is neither recursive nor complete by default
+
+`/tree/main` returns the top level only, and one page of at most 1000 entries.
+
+```
+/tree/main                    stabilityai/stable-diffusion-xl-base-1.0 → 10 files
+/tree/main?recursive=true     the same repo                            → 57 files
+```
+
+Miss `recursive=true` and a repo with `unet/`, `vae/` or `onnx/` subtrees downloads as a fraction of
+itself that still looks complete. Then, past 1000 entries, the response carries a `Link` header:
+
+```
+link: <…/tree/main?expand=false&recursive=true&limit=1000&cursor=ZXlKbWFX…>; rel="next"
+```
+
+`google/gemma-scope-9b-pt-res` is 1000 entries then 724. Follow the URL exactly as given rather than
+rebuilding it — the cursor is opaque. But **check its host before following it**: it is the one
+request target that comes from the response rather than from your own code, and a hub that can name
+an arbitrary address gets to point your HTTP client at one.
 
 ### The ETag you get is not the ETag you want
 
@@ -139,7 +160,7 @@ HuggingFace is implemented. The other two are checked against their live APIs, n
 
 | | HuggingFace | ModelScope | Ollama |
 |---|---|---|---|
-| Listing | `/api/models/{id}/tree/main` | `/api/v1/models/{id}/repo/files?Revision=master` | `/v2/library/{id}/manifests/{tag}` |
+| Listing | `/api/models/{id}/tree/main?recursive=true` | `/api/v1/models/{id}/repo/files?Revision=master` | `/v2/library/{id}/manifests/{tag}` |
 | Auth to list | none | none | none |
 | File identity | `path` | `Path` | **none — digest only** |
 | File type field | `type == "file"` | `Type == "blob"` | every layer is a file |

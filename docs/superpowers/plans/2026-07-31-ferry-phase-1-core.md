@@ -40,7 +40,7 @@ requirement of this phase, and do not remove the `finally` to satisfy it.
 
 ## Already Exists — Do Not Rewrite
 
-`ferry/src/main/java/io/github/nthuat/ferry/ResumableDownloader.kt` is written, committed, and covered by 12 tests in `ResumableDownloaderTest.kt`. Its public surface, which Task 4 consumes:
+`ferry/src/main/java/io/github/nthuat/ferry/ResumableDownloader.kt` is written, committed, and covered by 13 tests in `ResumableDownloaderTest.kt`. Its public surface, which Task 4 consumes:
 
 ```kotlin
 class ResumableDownloader(
@@ -1408,7 +1408,7 @@ Expected: PASS, 3 tests.
 - [ ] **Step 5: Run the whole suite**
 
 Run: `./gradlew :ferry:testDebugUnitTest`
-Expected: PASS. 12 pre-existing `ResumableDownloaderTest` tests plus 39 added by this plan.
+Expected: PASS. 13 pre-existing `ResumableDownloaderTest` tests plus 39 added by this plan.
 
 - [ ] **Step 6: Update the README status block**
 
