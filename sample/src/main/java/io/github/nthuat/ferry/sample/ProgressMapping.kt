@@ -8,11 +8,12 @@ import io.github.nthuat.ferry.RepoProgress
  *
  * [sawTransfer] is threaded in rather than recomputed here because a lone `RepoProgress.Complete`
  * carries no memory of what happened earlier in the same attempt, and that memory is the only thing
- * that tells a cache hit apart from a redownload: `RepoDownloader.download`'s cache-hit path jumps
- * straight from `CheckingSpace` to `Complete` with no `Downloading` or `Verifying` event in between
- * (that is what makes it the cheapest outcome), while a real transfer always fires at least one
- * `Downloading` event first. The caller sets [sawTransfer] to true the moment any `Downloading`
- * event is seen, and leaves it true for the rest of that attempt.
+ * that tells a cache hit apart from a redownload: `RepoDownloader.download`'s cache-hit path fires no
+ * `CheckingSpace`, `Downloading` or `Verifying` event at all — it jumps straight to `Complete` (that
+ * is what makes it the cheapest outcome, and more truthful: a cache hit never checks space, so it
+ * never claims to), while a real transfer always fires at least one `Downloading` event first. The
+ * caller sets [sawTransfer] to true the moment any `Downloading` event is seen, and leaves it true
+ * for the rest of that attempt.
  *
  * [lastFileCount] is the most recent `Downloading.fileCount` the same caller has seen, for the same
  * reason: `Complete` carries no file count of its own, so a real transfer's live count has to arrive

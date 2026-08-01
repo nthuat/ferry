@@ -276,6 +276,59 @@ class RepoDownloaderTest {
     }
 
     /**
+     * The bug this reorder fixes: `RepoDownloader.download()` used to check free space before
+     * checking whether the repo was already present and verified, so an already-downloaded, fully
+     * verified repo became unreachable the moment its device filled up — refusing to confirm what it
+     * already held, on a path that writes nothing and needs no space at all.
+     */
+    @Test
+    fun `a cache hit succeeds even when free space is almost entirely gone`() {
+        val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
+        server.enqueue(MockResponse().setBody(weightsBody))
+        runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+        val requestsAfterFirst = server.requestCount
+
+        val result = runBlocking { downloaderFor(files, freeBytes = 1L).download("a/b", temp.root) }
+
+        assertTrue(result.isSuccess)
+        assertEquals(
+            "a cache hit must not transfer any bytes, no matter how little space is free",
+            requestsAfterFirst,
+            server.requestCount,
+        )
+    }
+
+    /** The guarantee this reorder must not weaken: a repo genuinely not present yet still needs the space. */
+    @Test
+    fun `a repo not already present still refuses when free space is almost entirely gone`() {
+        val files = listOf(remote("model.bin", weightsBody.length.toLong()))
+
+        val result = runBlocking { downloaderFor(files, freeBytes = 1L).download("a/b", temp.root) }
+
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull() is InsufficientSpaceException)
+    }
+
+    /**
+     * If the cache-hit check ever ran before the security guards — or the guards were skipped — an
+     * escaping repo id pointing at a real, manifest-satisfying directory would be handed back as a
+     * successful "hit", turning a hostile repo id into a way to read arbitrary directories on disk. A
+     * directory that actually satisfies the manifest is planted at the escape target so this test
+     * would fail for that reason specifically, not merely because nothing happened to be sitting there.
+     */
+    @Test
+    fun `an escaping repo id is refused rather than treated as a cache hit`() {
+        val downloadRoot = temp.newFolder("root")
+        val escapeTarget = File(temp.root, "escape").apply { mkdirs() }
+        File(escapeTarget, "model.bin").writeText(weightsBody)
+        val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
+
+        val result = runBlocking { downloaderFor(files).download("../escape", downloadRoot) }
+
+        assertTrue("an escaping repo id must be refused, not treated as a cache hit", result.isFailure)
+    }
+
+    /**
      * "owner" and "owner/model" are both perfectly legitimate repo ids, and both resolve to strict
      * children of `into` — so no containment check catches this one. But into/owner *contains* the
      * committed into/owner/model, and the commit step's deleteRecursively() would take it along.

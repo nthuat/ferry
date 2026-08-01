@@ -73,11 +73,12 @@ class SampleViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     /**
-     * The Re-check action on a `Downloaded` row. Always the real downloader: `RepoDownloader.download`
-     * checks free space before it checks the cache, so routing a re-check of an already-complete
-     * model through the sabotage downloader would flip it to `WontFit` too — true to what the code
-     * does, but confusing here, since re-verifying a model already on disk needs no additional space
-     * at all. Kept out of scope for this control; see the sample report.
+     * The Re-check action on a `Downloaded` row. Always the real downloader, not routed through the
+     * sabotage toggle like [download] is: re-checking a row already known to be a good cache hit is
+     * about confirming what Ferry already verified, not about demonstrating the low-disk refusal —
+     * routing it through the sabotage downloader would only be interesting for the corruption
+     * control below, which already has its own dedicated button. Kept out of scope for this control;
+     * see the sample report.
      */
     fun recheck(repoId: String) {
         viewModelScope.launch { runDownload(repoId, realDownloader) }
