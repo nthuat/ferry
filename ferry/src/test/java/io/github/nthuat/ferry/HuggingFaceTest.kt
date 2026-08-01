@@ -2,8 +2,10 @@ package io.github.nthuat.ferry
 
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.RecordedRequest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -156,6 +158,69 @@ class HuggingFaceTest {
         assertTrue(
             weights.url.endsWith("/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/model.safetensors"),
         )
+    }
+
+    /**
+     * A page caps at 1000 entries and points at the next with a Link header. Verified live:
+     * google/gemma-scope-9b-pt-res answers 1000 entries with a rel="next" link, and that link
+     * answers 724 with none — 1724 in total. Consuming one page lists a fraction of the repo,
+     * commits it, and reports a complete model, with totalBytes short by the difference.
+     */
+    @Test
+    fun `a paged listing accumulates every page`() {
+        server.enqueue(
+            MockResponse()
+                .setBody("""[ { "type": "file", "path": "page1.bin", "size": 10 } ]""")
+                .addHeader("Link", "<${server.url("/page2")}>; rel=\"next\""),
+        )
+        server.enqueue(
+            MockResponse().setBody("""[ { "type": "file", "path": "page2.bin", "size": 32 } ]"""),
+        )
+
+        val manifest = runBlocking { repo.manifest("owner/model") }.getOrThrow()
+
+        assertEquals(listOf("page1.bin", "page2.bin"), manifest.files.map { it.path })
+        assertEquals("totalBytes must sum every page", 42L, manifest.totalBytes)
+    }
+
+    /**
+     * The next-page URL is chosen by the server — the one request target in this adapter that comes
+     * from a response rather than from the caller. Following it as given would let a compromised hub
+     * aim the host app's own OkHttpClient at any address it names, an internal one included.
+     *
+     * The off-host URL points at a *reachable* server — this same one under its other loopback name
+     * — and a second page is enqueued for it. An unreachable host like "evil.test" would make this
+     * test pass on a DNS failure whether or not the guard exists; here, removing the guard fetches
+     * the second page and the request count says so.
+     */
+    @Test
+    fun `a next page url on another host is refused and never requested`() {
+        val otherName = if (server.hostName == "localhost") "127.0.0.1" else "localhost"
+        val offHost = server.url("/page2").newBuilder().host(otherName).build()
+        server.enqueue(
+            MockResponse().setBody(treeJson).addHeader("Link", "<$offHost>; rel=\"next\""),
+        )
+        server.enqueue(MockResponse().setBody(treeJson))
+
+        val result = runBlocking { repo.manifest("owner/model") }
+
+        assertTrue(result.isFailure)
+        assertEquals("the off-host page must never be requested", 1, server.requestCount)
+    }
+
+    /** A cursor pointing back at its own page would otherwise loop until the process died. */
+    @Test
+    fun `a listing whose cursor never ends fails at the page cap`() {
+        server.dispatcher = object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse = MockResponse()
+                .setBody(treeJson)
+                .addHeader("Link", "<${server.url("/forever")}>; rel=\"next\"")
+        }
+
+        val result = runBlocking { repo.manifest("owner/model") }
+
+        assertTrue(result.isFailure)
+        assertEquals("must stop at the cap rather than keep asking", 100, server.requestCount)
     }
 
     @Test
