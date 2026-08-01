@@ -41,10 +41,19 @@ class ModelScope(
 
             // repoId travels through addPathSegments rather than string interpolation, so a "?", "#"
             // or "&" inside it is percent-encoded as ordinary segment text instead of being
-            // reinterpreted as a query or fragment delimiter. HuggingFace builds its URL by string
-            // interpolation and has to reject those characters up front for exactly this reason (see
-            // its URL_DELIMITERS); building through the typed API here removes the need for an
-            // equivalent guard rather than duplicating it.
+            // reinterpreted as a query or fragment delimiter — pinned by ModelScopeTest against the
+            // actual request produced, not just argued for here. HuggingFace builds its URL by
+            // string interpolation and has to reject those characters up front for exactly this
+            // reason (see its URL_DELIMITERS); building through the typed API here removes the need
+            // for an equivalent guard rather than duplicating it.
+            //
+            // A malformed id is therefore deliberately left for the hub itself to reject, rather
+            // than pre-checked here: the only thing a pre-check would buy is a faster, more specific
+            // failure instead of a slower, generic hub-side one, and it would cost the property
+            // above its only test — rejecting these characters before a request is built would make
+            // it impossible to ever observe, through this class's public API, the request such a
+            // repoId actually produces. Kept observable over kept fast. (This also means a repoId of
+            // "../x" is not rejected either; see docs/known-limitations.md, which affects both hubs.)
             val listingUrl = base.newBuilder()
                 .addPathSegments("api/v1/models")
                 .addPathSegments(repoId)
@@ -102,9 +111,13 @@ class ModelScope(
             Result.failure(e)
         } catch (e: SerializationException) {
             Result.failure(IOException("malformed listing response for $repoId", e))
-        } catch (e: IllegalArgumentException) {
-            Result.failure(IOException("invalid base URL or repo ID", e))
         }
+        // No IllegalArgumentException catch: unlike HuggingFace, nothing in this method parses a
+        // raw URL string. baseUrl goes through the null-returning toHttpUrlOrNull() above, and
+        // every other URL is assembled through HttpUrl.Builder, which encodes rather than throws —
+        // confirmed empirically (see the review-fixes note in the report) against empty strings, NUL
+        // bytes, unpaired surrogates and a 100k-character id. A catch here would be copied from a
+        // construction method this file does not use, dead and untestable.
     }
 
     /**

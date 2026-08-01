@@ -115,6 +115,40 @@ class ModelScopeTest {
         )
     }
 
+    /**
+     * Unlike HuggingFace, a delimiter character here is not rejected: it travels through
+     * addPathSegments, which percent-encodes it into inert path-segment text instead of letting it
+     * reinterpret as a query or fragment delimiter (see the KDoc on `ModelScope.manifest` for why no
+     * pre-check exists). Proven here against the actual request produced, not by argument — this is
+     * the same repoId shape HuggingFaceTest rejects outright; this adapter instead sends it safely.
+     */
+    @Test
+    fun `a repo id containing url delimiters is percent-encoded rather than reshaping the request`() {
+        server.enqueue(MockResponse().setBody(listingJson))
+
+        val result = runBlocking { repo.manifest("owner/model?recursive=false&x=1#frag") }
+
+        assertTrue(
+            "the request must still succeed - the character is encoded, not rejected",
+            result.isSuccess,
+        )
+        val recordedPath = server.takeRequest().path!!
+        assertEquals(
+            "the repoId's own '?' must not open a second, earlier query string",
+            1,
+            recordedPath.count { it == '?' },
+        )
+        assertEquals(
+            "the real query must be exactly these two parameters, unclobbered by the repoId's own ? and &",
+            "Revision=master&Recursive=True",
+            recordedPath.substringAfter('?'),
+        )
+        assertTrue(
+            "the repoId's '?' must be percent-encoded rather than left as a literal delimiter",
+            recordedPath.contains("model%3Frecursive"),
+        )
+    }
+
     @Test
     fun `a custom revision is used in the listing url in place of the master default`() {
         server.enqueue(MockResponse().setBody(listingJson))
