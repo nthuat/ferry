@@ -510,18 +510,101 @@ class RepoDownloaderTest {
     }
 
     /**
-     * Documented, not fixed, in docs/known-limitations.md: a manifest that declares a file literally
-     * named ".ferry" inside a subdirectory makes that repo unreplaceable afterwards. The nested-
-     * marker check above cannot tell this file apart from a real nested repo's marker —
-     * distinguishing them is exactly the kind of cleverness this codebase does not attempt — so once
-     * such a repo commits, any later replace attempt hits the same refusal a real nested repo would.
+     * PROBE1 — the Critical code review found in an earlier version of this fix, verified against
+     * an isolated copy of the repo, not argued: a design that moved the ownership marker entirely to
+     * a shadow tree (`into/.ferry/<repoId>/.ferry`) made ownership a property of a *name*, not of the
+     * directory. Nothing ever deletes a shadow entry, so removing `into/owner` out of band — the
+     * only way to delete a model, and the remedy known-limitations.md names for every refusal — left
+     * the shadow marker standing with nothing left to describe. Foreign content placed at the same
+     * path afterwards inherited a stranger's ownership record: the next `download("owner", ...)`
+     * read a marker that still said "owner", passed the nested check too, and deleted the user's own
+     * directory on its way to `Result.success`.
      *
-     * This test pins that consequence in place rather than testing for a bug: if a future change
-     * makes such a repo silently replaceable again, this goes red and the doc entry is caught
-     * quietly going out of date instead of just being trusted.
+     * Revert-check: this must fail against a design where ownership lives only in the shadow tree,
+     * and pass once ownership is restored to `target/.ferry` — a marker that lives and dies with the
+     * same `renameTo`/`deleteRecursively` as the directory it describes has nothing left to claim
+     * once that directory is gone.
      */
     @Test
-    fun `a manifest-declared file literally named ferry in a subdirectory is a documented limitation`() {
+    fun `a directory ferry once committed but that was removed out of band is refused after foreign content replaces it`() {
+        val files = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(configBody))
+        val committed = runBlocking { downloaderFor(files).download("owner", temp.root) }.getOrThrow()
+
+        // Out of band: not through Ferry, exactly the remedy known-limitations.md names for every
+        // refusal ("remove the directory to retry"). A real user could do this with a file manager.
+        committed.deleteRecursively()
+        val theirs = File(committed, "notes.txt")
+        theirs.parentFile?.mkdirs()
+        theirs.writeText("the user's own file, unrelated to the repo Ferry once committed here")
+
+        server.enqueue(MockResponse().setBody(configBody))
+        val result = runBlocking { downloaderFor(files).download("owner", temp.root) }
+
+        assertTrue(
+            "a directory removed out of band and replaced with foreign content must not inherit " +
+                "the old commit's ownership",
+            result.isFailure,
+        )
+        assertEquals(
+            "foreign content must survive a refused replace",
+            "the user's own file, unrelated to the repo Ferry once committed here",
+            theirs.readText(),
+        )
+    }
+
+    /**
+     * The HIGH the same review found: the nested-repo guard's own remediation text says "remove
+     * that nested repo first", but removing it did not actually clear the refusal, because the
+     * shadow entry recording the nesting was never deleted along with it — an orphan that blocked
+     * the parent forever, verified identical before and after removal. Fixed by cross-checking each
+     * shadow child against whether the real, corresponding directory still exists: the shadow tree
+     * nominates a candidate, reality confirms or dismisses it.
+     */
+    @Test
+    fun `removing a nested repo out of band clears the refusal on its parent`() {
+        val outerFirst = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(configBody))
+        runBlocking { downloaderFor(outerFirst).download("owner", temp.root) }.getOrThrow()
+
+        val inner = listOf(remote("weights.bin", weightsBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(weightsBody))
+        val committedInner =
+            runBlocking { downloaderFor(inner).download("owner/model", temp.root) }.getOrThrow()
+
+        // Exactly what the refused error message tells the caller to do.
+        committedInner.deleteRecursively()
+
+        // A different manifest for the same "owner" id, so the cache check at the top of
+        // download() misses and this call reaches the commit step instead of returning the
+        // already-satisfied directory untouched.
+        val otherBody = configBody + "-different"
+        val outerSecond = listOf(remote("config.json", otherBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(otherBody))
+        val result = runBlocking { downloaderFor(outerSecond).download("owner", temp.root) }
+
+        assertTrue(
+            "removing the nested repo the error message named must actually clear the refusal",
+            result.isSuccess,
+        )
+    }
+
+    /**
+     * The bug docs/known-limitations.md's now-closed entry describes: a manifest declaring a file
+     * literally named ".ferry" inside a subdirectory used to brick the repo permanently, because the
+     * nested-repo guard walked the *real* tree hunting any file named ".ferry" and had no way to tell
+     * this one apart from a real nested repo's marker — distinguishing them by name alone is exactly
+     * the kind of cleverness this codebase does not attempt.
+     *
+     * Closed by moving the *nested-repo* question to a shadow tree under `into/.ferry` that a hub's
+     * manifest can never write into, named ".ferry" or anything else — see `MARKER_ROOT`'s doc. The
+     * ownership marker itself stays at `target/.ferry`, unchanged; only the nested-check stopped
+     * walking the real tree by name. This is the revert-check the fix's own task named: run this
+     * test against the code before that move and it fails on `result.isSuccess` the same way the
+     * test it replaces used to pin as a documented limit.
+     */
+    @Test
+    fun `a manifest-declared file literally named ferry in a subdirectory no longer bricks the repo`() {
         val notAMarker = "not a marker, just a downloaded file"
         val first = listOf(
             remote("config.json", configBody.length.toLong()),
@@ -544,15 +627,10 @@ class RepoDownloaderTest {
         val result = runBlocking { downloaderFor(second).download("owner", temp.root) }
 
         assertTrue(
-            "a file named .ferry in a subdirectory makes the repo unreplaceable — documented, " +
-                "not a bug",
-            result.isFailure,
+            "a file named .ferry in a subdirectory must not make the repo permanently unreplaceable",
+            result.isSuccess,
         )
-        assertEquals(
-            "the original commit must survive the refused replace",
-            configBody,
-            File(committed, "config.json").readText(),
-        )
+        assertEquals(otherBody, File(committed, "config.json").readText())
     }
 
     /**
@@ -771,6 +849,24 @@ class RepoDownloaderTest {
     @Test
     fun `a repo id that cancels back to the download root fails without destroying it`() {
         assertCannotDestroyCommittedRepos("owner/..")
+    }
+
+    /**
+     * ".ferry" is the literal name of the shadow directory `into/.ferry` reserves for every repo's
+     * own marker (see `MARKER_FILE`'s doc). `resolveInside(into, ".ferry")` alone would not catch
+     * this — the result is a perfectly ordinary strict child of `into` — so this is the marker
+     * namespace's own analogue of the ".staging/evil" case below, guarded the same way: a repo id
+     * whose target resolves onto the reserved root itself, or inside it.
+     */
+    @Test
+    fun `a repo id of the marker directory's own name fails without destroying the repos already downloaded`() {
+        assertCannotDestroyCommittedRepos(".ferry")
+    }
+
+    /** And so does anything inside it, the same way ".staging/evil" does for the staging namespace. */
+    @Test
+    fun `a repo id inside the marker namespace fails without destroying the repos already downloaded`() {
+        assertCannotDestroyCommittedRepos(".ferry/evil")
     }
 
     @Test

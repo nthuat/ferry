@@ -8,22 +8,56 @@ condition that makes it reachable, so the next person can tell whether their cha
 This exists because the review record that produced it lives in a git-ignored scratch directory that
 gets deleted. A limitation nobody wrote down is a limitation nobody knows they inherited.
 
-## A manifest that declares a file literally named `.ferry` inside a subdirectory
+## Closed: a manifest that declares a file literally named `.ferry` inside a subdirectory
 
-The nested-repo guard refuses to replace a target directory when any `.ferry` file exists anywhere
-in its subtree other than `target/.ferry` itself. That guard is what stops one committed repo id
-from deleting another nested inside it (`owner` containing `owner/model`). It cannot tell a real
-marker apart from an ordinary downloaded file that merely happens to share the name — distinguishing
-them is exactly the kind of cleverness this codebase has been bitten by before, so it does not try.
+Was: the nested-repo guard refused to replace a target directory when any `.ferry` file existed
+anywhere in its subtree other than `target/.ferry` itself. That guard is what stops one committed
+repo id from deleting another nested inside it (`owner` containing `owner/model`). It could not tell
+a real marker apart from an ordinary downloaded file that merely happened to share the name —
+distinguishing them was exactly the kind of cleverness this codebase has been bitten by before, so it
+did not try. A hub's manifest listing a file at `<subdirectory>/.ferry` committed once and could then
+never be replaced: a failed cache check, a corrupted file, a plain re-download all hit the
+nested-marker check and were refused, permanently, with no API to clear it.
 
-**Condition:** a hub's manifest lists a file whose path is `<subdirectory>/.ferry` (not at the repo
-root — a root-level `.ferry` entry is overwritten by Ferry's own marker write, which always lands
-last). Once such a repo commits, any later attempt to replace it — a failed cache check, a
-corrupted file, a re-download — hits the nested-marker check and is refused.
+**Closed by splitting the question the marker was answering, not by relocating the whole marker.**
+An intermediate version of this fix moved the marker entirely to a shadow tree
+(`into/.ferry/X/.ferry`), keyed by repo id rather than living inside the repo's own directory —
+code review, verified against an isolated copy rather than argued, found that this made ownership a
+property of a *name* nothing ever deletes, instead of a property of the *directory* that `renameTo`
+and `deleteRecursively` already keep in lockstep. A directory removed out of band — the only way to
+delete a model, and the remedy "A refused directory needs manual removal" below names for every
+refusal — left its shadow marker standing with nothing left to describe; foreign content placed at
+the same path afterwards inherited the old commit's ownership and was deleted to make room for a new
+one, the exact class of bug this file exists to guard against. Reverted for that reason.
 
-**Consequence:** the same terminal state as the existing no-marker refusal. There is no API to clear
-it; the error message names the offending `.ferry` file and says to remove it first. Neither
-HuggingFace nor ModelScope publishes a file named `.ferry`.
+The ownership marker is back at `target/.ferry`, exactly where and how it always was — written into
+staging so the rename that publishes the repo's content publishes the marker with it, atomically, so
+there is nothing to migrate for this half. **Only the nested-repo question moved**, to a shadow tree
+under `into/.ferry` that records which repo ids are committed, never anything read back about their
+content — see `RepoDownloader.kt`'s `MARKER_ROOT` doc. That is enough on its own to close this entry:
+the nested check no longer walks the real tree looking for a file named `.ferry`, so a manifest
+entry at `<subdirectory>/.ferry` is now ordinary content at every depth, root included, and the
+original condition can no longer brick a repo. A shadow entry is never deleted either, so it is
+cross-referenced against the real tree before being trusted — see the nested-check's own comment —
+which is what keeps a stale entry from blocking a replace forever the way the original bug did, and
+what makes removing the nested repo the refusal names actually clear that refusal afterwards (see
+`RepoDownloaderTest`'s revert-checked coverage of both this and the reverted design's own Critical).
+
+**One carve-out this entry used to celebrate removing is back, correctly.** A manifest entry named
+`.ferry` at the repo *root* — not a subdirectory — is still silently overwritten by Ferry's own
+marker write landing last on the same path, `target/.ferry`, because ownership is co-located again.
+This is the original, pre-existing behaviour, not a new gap: neither HuggingFace nor ModelScope
+publishes a file named `.ferry`, so it costs neither adapter anything in practice, and it is the same
+shape of trade already accepted elsewhere in this file rather than a silent reversal — stated here
+plainly instead of leaving the earlier "no longer overwritten" claim standing.
+
+**Compatibility.** The ownership marker itself is unchanged from its original format, so a directory
+committed by any version of this library reads the same way here — nothing to migrate for that half.
+The nested-repo shadow tree is new bookkeeping with no retroactive knowledge of relationships
+established before it existed: an ancestor and descendant both committed under a version of Ferry
+that predates the shadow tree would, on first contact with this version, replace as if nothing were
+nested — moot in practice, since Ferry is unpublished with no installed base old enough to have such
+a pair, and stated plainly rather than left silent.
 
 ## Closed: a file declared with size 0 was verified by nothing
 

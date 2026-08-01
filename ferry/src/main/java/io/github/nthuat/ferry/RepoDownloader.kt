@@ -47,14 +47,52 @@ class VerificationException(
 /**
  * Names a committed directory as Ferry's own, and records which repo id owns it.
  *
+ * Lives at `target/.ferry`, inside the repo's own directory, written into staging so the same
+ * `renameTo` that publishes the repo's content publishes the marker with it, and read back from
+ * `target` itself before any replace. That co-location is the entire safety property: the marker
+ * lives and dies with exactly the directory it describes. A directory removed out of band — the
+ * only way to delete a model, per this file's own refusal message — takes its marker with it, so
+ * nothing is left to misdescribe whatever gets put at that path afterwards. An earlier version of
+ * this fix moved ownership into a side tree keyed by name instead of by directory; nothing ever
+ * deleted an entry there, so a directory removed out of band and replaced with foreign content
+ * inherited the old commit's ownership and was deleted to make room for a new one — the exact class
+ * of bug this file exists to guard against. Reverted for that reason; see
+ * docs/known-limitations.md's closed entry on this and its discussion of what still moved.
+ *
  * The commit step replaces whatever sits at the target path, and one repo id is free to be a
  * directory prefix of another — "owner" and "owner/model" are both ordinary ids, and both resolve
- * to strict children of the download root, so no containment check can tell them apart. Ferry
- * therefore deletes only what it wrote under this exact id. A directory with no marker, a marker
- * naming a different id, or one that contains another marker anywhere beneath it, is refused
- * rather than removed.
+ * to strict children of the download root, so no containment check on the id alone can tell them
+ * apart. Ferry therefore deletes only what it wrote under this exact id: a directory with no
+ * marker, or a marker naming a different id, is refused rather than removed. Telling whether
+ * something is committed *nested inside* this id is a different question, answered by a separate
+ * shadow tree — see [download]'s own nested-check comment for why that one could not stay
+ * co-located the same way: a hub's manifest can declare a file at any path in the real tree,
+ * including one that happens to be named `.ferry`, and nothing there can tell that file apart from
+ * a marker by name alone (docs/known-limitations.md's closed entry).
  */
 private const val MARKER_FILE = ".ferry"
+
+/**
+ * The root of a shadow tree, sibling to every repo under `into`, that records only *which* repo ids
+ * have been committed — never what they contain, and never anything resembling the ownership
+ * question [MARKER_FILE] answers.
+ *
+ * Named the same as [MARKER_FILE] — this directory and that file share nothing but a name; Ferry
+ * never conflates them. `into/.ferry/X` exists as a plain, possibly-empty directory once repo id
+ * `X` is committed, mirroring `into` one-for-one the way `into/.staging/X` already does for staging.
+ * A nested id like `X/Y` then creates `into/.ferry/X/Y` as `X`'s own child, without needing to tell
+ * `X`'s entry apart from `Y`'s the way a leaf-file scheme would — a directory can always gain
+ * another child, so no two ids ever compete for the same path here regardless of commit order.
+ *
+ * A shadow entry is written once and never deleted — there is no API that would tell it to be, any
+ * more than there is one to clear an ordinary refusal. That makes every entry here a *candidate*
+ * nested id, not proof of one still being real: the real directory it names may since have been
+ * removed out of band, or may never have existed if the commit that would have written it crashed
+ * first. [download]'s nested-check cross-references each candidate against the real tree before
+ * trusting it, which is what lets a stale entry sit here harmlessly forever rather than block
+ * anything — see that check's own comment.
+ */
+private const val MARKER_ROOT = MARKER_FILE
 
 /**
  * Downloads a whole model repository, or none of it.
@@ -102,23 +140,32 @@ class RepoDownloader(
             // two distinct ids (e.g. "a/b" and "a--b") can never collide onto the same directory.
             //
             // staging is validated against stagingRoot (into/.staging), not against `into` itself:
-            // `into` is loose enough to contain both `.staging` and every already-committed repo, so
-            // a repoId like "../<other-repo>" resolves to that other repo's own directory and would
-            // still pass a check against `into`. Shrinking the boundary to the one directory a
-            // repoId's staging copy is actually allowed to land in closes that.
+            // `into` is loose enough to contain `.staging`, `.ferry`, and every already-committed
+            // repo, so a repoId like "../<other-repo>" resolves to that other repo's own directory
+            // and would still pass a check against `into`. Shrinking the boundary to the one
+            // directory a repoId's staging copy is actually allowed to land in closes that.
             val stagingRoot = File(into, ".staging")
             val stagingDir = resolveInside(stagingRoot, repoId)
             staging = stagingDir
             val target = resolveInside(into, repoId)
 
-            // A repoId of ".staging/evil" resolves `target` to a path inside stagingRoot — not an
-            // escape (it never leaves `into`, so the check above misses it), but a collision with
-            // the reserved staging namespace that would let one repo's commit clobber another
-            // repo's in-flight staging copy, or vice versa.
+            // Which ids are committed *nested inside* repoId — see MARKER_ROOT's doc for the shape
+            // and why it is a separate tree from the ownership marker. markerDir is repoId's own
+            // slot: empty until something nests inside it, at which point it gains a child.
+            val markerRoot = File(into, MARKER_ROOT)
+            val markerDir = resolveInside(markerRoot, repoId)
+
+            // A repoId of ".staging/evil" or ".ferry/evil" never leaves `into` (so resolveInside's
+            // own "strictly inside into" check misses both), but a target there collides with a
+            // namespace `into` reserves for Ferry's own bookkeeping — staging or markers — which
+            // would let one repo's commit clobber another repo's in-flight staging copy, or the
+            // marker namespace itself, rather than just being an ordinary sibling directory.
             val targetPath = target.canonicalPath
-            val stagingRootPath = stagingRoot.canonicalPath
-            if (targetPath == stagingRootPath || targetPath.startsWith(stagingRootPath + File.separator)) {
+            if (collidesWith(targetPath, stagingRoot)) {
                 throw IOException("repo id collides with the staging area: $repoId")
+            }
+            if (collidesWith(targetPath, markerRoot)) {
+                throw IOException("repo id collides with the marker directory: $repoId")
             }
 
             // Already here and still correct: the cheapest possible outcome, and the one a naive
@@ -221,8 +268,12 @@ class RepoDownloader(
             // Written into staging rather than into target after the rename, so the rename commits
             // the marker atomically with the repo: a reader never sees a committed directory that
             // has no marker, and a crash between the two cannot strand a repo that is then refused
-            // forever. Written after the download loop, so a manifest entry literally named
-            // ".ferry" cannot forge ownership of a directory — Ferry's own write always lands last.
+            // forever, or — the sharper failure — leave a marker whose directory is gone, standing
+            // ready to misdescribe whatever gets put at that path next. Written after the download
+            // loop, so a manifest entry literally named ".ferry" *at the repo root* cannot forge
+            // ownership of a directory — Ferry's own write always lands last, overwriting it. A
+            // manifest entry named ".ferry" *in a subdirectory* is not shadowed by this at all and
+            // downloads as ordinary content: this write only ever touches stagingDir's own root.
             File(stagingDir, MARKER_FILE).writeText(repoId)
 
             if (target.exists()) {
@@ -238,20 +289,29 @@ class RepoDownloader(
 
                 // A marker matching repoId at $target only says Ferry committed *this* directory
                 // under this id — it says nothing about what got committed underneath it since.
-                // "owner" and "owner/model" are both ordinary ids (see MARKER_FILE's doc): download
-                // ("owner/model") writes its own marker at target/model/.ferry without objection,
+                // "owner" and "owner/model" are both ordinary ids (see MARKER_FILE's doc): committing
+                // "owner/model" writes its own marker at target/model/.ferry without objection,
                 // because into/owner/model does not exist yet when it commits. A later
                 // download("owner") would otherwise sail past the check above — its own marker
-                // still matches — and deleteRecursively() would take the nested repo with it. Any
-                // .ferry strictly below target, at any depth, is refused before the delete rather
-                // than risk that: usually a real nested repo, but not provably so — a manifest can
-                // declare an ordinary file at that same name (docs/known-limitations.md) — so the
-                // message below states only what is actually known, not which case this is.
-                val nested = target.walkTopDown()
-                    .firstOrNull { it.isFile && it.name == MARKER_FILE && it != marker }
-                if (nested != null) {
+                // still matches — and deleteRecursively() would take the nested repo with it.
+                //
+                // Answered by the shadow tree (MARKER_ROOT's doc), not by walking target's own
+                // subtree the way this used to: a hub's manifest can put a file named ".ferry" at
+                // any depth in the real tree, and nothing in that tree can tell it apart from a real
+                // nested marker by name alone (docs/known-limitations.md's closed entry) — the walk
+                // this replaces was exactly that guess. markerDir's children are never that
+                // ambiguous, because only Ferry ever writes there, but they are not proof either: a
+                // shadow entry is never deleted, so it can name an id whose real directory was since
+                // removed out of band, or one whose commit crashed before ever creating it. Cross-
+                // referencing each candidate against `File(target, candidate.name).exists()` is what
+                // tells a genuinely-nested repo apart from a stale entry — real content wins the
+                // refusal, a stale entry loses it and blocks nothing, which is also what makes
+                // removing the nested repo the refusal names actually clear that refusal afterwards.
+                val nestedChild = markerDir.listFiles()?.firstOrNull { File(target, it.name).exists() }
+                if (nestedChild != null) {
                     throw IOException(
-                        "$target contains $nested; refusing to replace it — remove $nested first",
+                        "$target contains a repo committed under '$repoId/${nestedChild.name}'; " +
+                            "refusing to replace it — remove that nested repo first",
                     )
                 }
 
@@ -259,6 +319,21 @@ class RepoDownloader(
                     return@withContext Result.failure(IOException("cannot replace $target"))
                 }
             }
+
+            // Records repoId itself as a candidate nested id for whichever ancestor id, if any, is
+            // ever checked against it later — see MARKER_ROOT's doc. Written before the rename, not
+            // after: a crash in between leaves this entry naming a directory that turns out not to
+            // exist yet, which the nested check above already treats as a stale, harmless candidate.
+            // The other order would leave the opposite: real, committed content with no shadow entry
+            // at all, invisible to an ancestor's nested check, which would then delete it for real —
+            // the one direction that actually loses something that was there. Only one mkdirs() call,
+            // not a write too: nothing is ever read back out of this tree's own content, only its
+            // shape, so recording repoId here needs nothing more than the directory existing.
+            markerDir.mkdirs()
+            if (!markerDir.isDirectory) {
+                return@withContext Result.failure(IOException("cannot record $repoId as committed"))
+            }
+
             target.parentFile?.mkdirs()
             if (!stagingDir.renameTo(target)) {
                 return@withContext Result.failure(IOException("cannot commit $target"))
@@ -305,6 +380,19 @@ class RepoDownloader(
     }
 
     /**
+     * Whether canonical path [targetPath] is, or falls strictly inside, [reservedRoot].
+     *
+     * Separate from [resolveInside]: that function only rejects a path that escapes its parent, and
+     * both `.staging` and `.ferry` are ordinary strict children of `into`, not escapes — this is the
+     * narrower check that a repoId did not resolve onto one of the handful of names `into` itself
+     * reserves for Ferry's own bookkeeping.
+     */
+    private fun collidesWith(targetPath: String, reservedRoot: File): Boolean {
+        val reservedPath = reservedRoot.canonicalPath
+        return targetPath == reservedPath || targetPath.startsWith(reservedPath + File.separator)
+    }
+
+    /**
      * Resolves [relative] inside [parent] and fails if it escapes.
      *
      * Repo ids come from the calling app and file paths come from the hub's manifest over the
@@ -316,8 +404,9 @@ class RepoDownloader(
      * File(parent, "") and File(parent, ".") are both exactly parent, so permitting equality made
      * an empty repo id — a blank search field, a null coalesced to "" — resolve `target` onto the
      * download root, whose commit step then deleteRecursively()s every repo the user had. None of
-     * the four callers wants the parent: a repo never stages as the whole staging area, a target
-     * is never the download root, and a file is never the directory containing it.
+     * this method's callers wants the parent: a repo never stages as the whole staging area, a
+     * target is never the download root, a repo's own shadow directory never sits directly at the
+     * marker root, and a file is never the directory containing it.
      */
     private fun resolveInside(parent: File, relative: String): File {
         val candidate = File(parent, relative)
