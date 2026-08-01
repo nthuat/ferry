@@ -47,13 +47,15 @@ class ModelScope(
             // reason (see its URL_DELIMITERS); building through the typed API here removes the need
             // for an equivalent guard rather than duplicating it.
             //
-            // A malformed id is therefore deliberately left for the hub itself to reject, rather
-            // than pre-checked here: the only thing a pre-check would buy is a faster, more specific
-            // failure instead of a slower, generic hub-side one, and it would cost the property
-            // above its only test — rejecting these characters before a request is built would make
-            // it impossible to ever observe, through this class's public API, the request such a
-            // repoId actually produces. Kept observable over kept fast. (This also means a repoId of
-            // "../x" is not rejected either; see docs/known-limitations.md, which affects both hubs.)
+            // A malformed id is left for the hub itself to reject, rather than pre-checked here. A
+            // client-side shape check on repo ids is a denylist, and the hub alone is the authority
+            // on which ids exist: a denylist goes stale the moment the hub widens its own id rules,
+            // and fails closed — rejecting a legitimate id the hub would have served. Deferring to
+            // the hub cannot go stale that way; the cost is a slower, less specific failure for what
+            // is a programming error, not a user-facing path. The same reasoning covers "../x" (see
+            // docs/known-limitations.md, which affects both adapters): the traversal it enables is
+            // bounded to the hub's own origin, which is what makes deferring acceptable rather than
+            // merely convenient.
             val listingUrl = base.newBuilder()
                 .addPathSegments("api/v1/models")
                 .addPathSegments(repoId)

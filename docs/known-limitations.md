@@ -109,9 +109,10 @@ same-origin escalation. It does mean a caller (or a `repoId` sourced from somewh
 the caller itself) can aim a `GET` at any path under that origin, not only ones inside the models
 namespace.
 
-**Not fixed here:** no `repoId`-shape check was added for this. `ModelScope.manifest`'s KDoc records
-the same choice for `?`/`&`/`#` — a malformed id is deliberately left for the hub to reject, because
-the alternative would cost the delimiter-encoding property its only test (see `ModelScopeTest`'s
-`a repo id containing url delimiters …` test and the reasoning above it). A future `repoId`-shape
-check that rejects `..` segments — a separate, narrower check than the delimiter one, since it would
-not have that same conflict — would close this for both adapters at once.
+**Not fixed here:** no `repoId`-shape check was added for this, or for `?`/`&`/`#` (see
+`ModelScope.manifest`'s KDoc). Both fall out of the same reasoning: a client-side shape check on repo
+ids is a denylist, and the hub alone is the authority on which ids are valid — a denylist goes stale
+the moment the hub's own id rules change, and fails closed on a legitimate id rather than deferring to
+the hub that actually knows. `..` is not a separate, narrower case; it is the same problem, made
+acceptable to defer specifically because the traversal it enables is bounded to the hub's own origin
+rather than reaching anywhere else.
