@@ -173,14 +173,18 @@ class HuggingFace(
          * `rel="next"`, or the unquoted `rel=next` that RFC 8288 also permits. The trailing
          * lookahead is what stops this matching `rel=nextpage`.
          *
-         * Anchored to `;` or the start of the string — but that anchor alone is not sufficient,
-         * because `;` is a legal sub-delimiter inside a URL's own path or query, not only a
-         * parameter separator: `<.../x;rel=next>; rel="prev"` still has a `;` sitting right before
-         * the impostor. What actually keeps this to the real `rel` attribute is the call site
-         * (`nextLink`) testing this only against the text after the URI-Reference's closing `>`, so
-         * the URL's own text is out of scope before this regex ever runs against it.
+         * Anchored to an actual `;`, not also to the start of the string. `nextLink` already scopes
+         * this to the text after the URI-Reference's closing `>`, and the Link grammar (RFC 8288)
+         * requires every parameter in that text — including the first — to be preceded by a real
+         * `;`; there is no production for one sitting directly against the `>` with nothing between
+         * them. Accepting the start of the string as an alternative anchor used to be harmless: it
+         * was tested against the *whole* segment, where the URL always came first, so the start of
+         * the string was never where a real `rel` attribute could begin. Once the URL was scoped
+         * out, that same alternative started meaning "right after `>`, no separator" — a position
+         * the grammar never permits — and a segment missing that separator, `<url>rel=next;
+         * rel="prev">`, has no valid parameter there at all, but matched anyway.
          */
-        val NEXT_REL = Regex("""(?:^|;)\s*rel="?next"?(?![\w-])""")
+        val NEXT_REL = Regex(""";\s*rel="?next"?(?![\w-])""")
 
         /**
          * ignoreUnknownKeys is load-bearing, not hygiene. HuggingFace adds fields to this response

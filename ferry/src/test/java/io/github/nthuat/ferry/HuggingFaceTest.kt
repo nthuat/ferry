@@ -246,6 +246,38 @@ class HuggingFaceTest {
     }
 
     /**
+     * Scoping the match to the text after `>` (the fix above) closed the query-string and
+     * semicolon-in-URL leaks, but left the anchor's `(?:^|;)` alternative alone. Tested against the
+     * whole segment, `^` was practically unreachable — every real segment starts `<url>…`, so only
+     * the `;` branch ever fired. Once the URL was out of scope, `^` started meaning "right after
+     * `>`, with no separator at all" — a position the Link grammar (RFC 8288) never permits, because
+     * every parameter, including the first, is preceded by a real `;`. A segment missing that
+     * separator has no valid parameter there at all, but `^` let it match as though it did: this
+     * segment's real, well-formed attribute is `rel="prev"`, yet the fake `rel=next` sitting directly
+     * against the closing `>` was read as the next page.
+     */
+    @Test
+    fun `a link with no separator before a fake rel=next is not treated as next`() {
+        server.enqueue(
+            MockResponse()
+                .setBody("""[ { "type": "file", "path": "page1.bin", "size": 10 } ]""")
+                .addHeader("Link", "<${server.url("/prev")}>rel=next; rel=\"prev\">"),
+        )
+        server.enqueue(
+            MockResponse().setBody("""[ { "type": "file", "path": "page2.bin", "size": 20 } ]"""),
+        )
+
+        val manifest = runBlocking { repo.manifest("owner/model") }.getOrThrow()
+
+        assertEquals(
+            "a segment whose real attribute is rel=\"prev\" must not be treated as next",
+            listOf("page1.bin"),
+            manifest.files.map { it.path },
+        )
+        assertEquals("no second page may be requested", 1, server.requestCount)
+    }
+
+    /**
      * The next-page URL is chosen by the server — the one request target in this adapter that comes
      * from a response rather than from the caller. Following it as given would let a compromised hub
      * aim the host app's own OkHttpClient at any address it names, an internal one included.

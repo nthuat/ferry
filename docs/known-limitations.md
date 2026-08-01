@@ -20,8 +20,8 @@ last). Once such a repo commits, any later attempt to replace it — a failed ca
 corrupted file, a re-download — hits the nested-marker check and is refused.
 
 **Consequence:** the same terminal state as the existing no-marker refusal. There is no API to clear
-it; the error message says to remove the directory. Neither HuggingFace nor ModelScope publishes a
-file named `.ferry`.
+it; the error message names the offending `.ferry` file and says to remove it first. Neither
+HuggingFace nor ModelScope publishes a file named `.ferry`.
 
 ## A file declared with size 0 is verified by nothing
 
