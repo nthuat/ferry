@@ -64,3 +64,28 @@ built against the published artifact, and nothing is published yet.
 
 **Cheap partial fix, done:** `checkEmbeddable` asserts that the `api` configuration's dependencies
 include okhttp and a module exporting `CoroutineDispatcher`.
+
+## ModelScope's file listing may paginate above what has been tested
+
+`ModelScope.manifest` makes exactly one request and never follows a cursor or page parameter. Tried
+live against `PageSize`, `PageNumber`, `Limit` and `limit` query parameters on the listing endpoint —
+all four were silently ignored and the full listing came back regardless — and no `Link`-style header
+appeared on repos of 15 and 39 files. The official Python client's own model-file-listing call
+(`list_repo_files` in `modelscope/modelscope_hub`) takes no paging parameter either; only its separate
+*dataset* listing method pages, and even that is a plain page-number loop rather than a cursor or a
+total-count field. No field resembling either was seen anywhere in the model listing envelope
+(`Code`/`Success`/`Message`/`RequestId`/`Data.Files`/`Data.IsVisual`/`Data.LatestCommitter`).
+
+**This is evidence, not proof of an absent cap.** HuggingFace's own 1000-entry `Link`-header cap was
+just as invisible against small test repos, until a 1724-file repo surfaced it — see the README's
+"worth knowing" section. Nobody has tested a ModelScope repo of hundreds or thousands of files, and
+this adapter deliberately does not build a loop against a mechanism nobody has observed.
+
+**Condition:** a ModelScope repo whose recursive file count exceeds whatever cap, if any, the listing
+endpoint enforces above 39 entries.
+
+**Consequence, if a cap exists:** the exact failure mode this feature exists to prevent — a manifest
+silently missing the entries past the cap, downloaded, verified and committed as a complete model,
+with no error at any layer. A repo of that size would settle the question either way: a truncated
+`files` list confirms a cap, and a complete one across a genuinely large repo would be the first real
+evidence against one.
