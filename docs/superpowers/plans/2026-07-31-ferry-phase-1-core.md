@@ -4,6 +4,14 @@
 
 **Goal:** Download a HuggingFace model repository to a directory, refusing to start if it cannot fit and refusing to commit if any file fails its SHA-256.
 
+**Guarantee 4 is scoped down for this phase, deliberately.** The README states "always resumable";
+what this phase delivers is resumability *within one download attempt* — `ResumableDownloader`
+recovers from a dropped connection, and `RepoDownloader` skips files already present and verified.
+Resuming across process death does not work here, because `RepoDownloader` deletes its staging
+directory in a `finally` block to guarantee no half-written repo survives a failure. Both cannot be
+true at once without persisted state, which is its own plan. Do not treat the README's wording as a
+requirement of this phase, and do not remove the `finally` to satisfy it.
+
 **Architecture:** A `ModelRepo` interface describes a hub; `HuggingFace` implements it by reading the public tree API. `RepoDownloader` orchestrates: check space, download each file through the existing `ResumableDownloader` into a staging directory, verify each hash, then move the whole directory into place. Nothing reaches the final path until every file verifies, so a reader never sees a partial or corrupt repo.
 
 **Tech Stack:** Kotlin 2.0.21, OkHttp 4.12.0, kotlinx-serialization-json 1.7.3, kotlinx-coroutines 1.9.0, JUnit 4.13.2, MockWebServer 4.12.0.
@@ -23,14 +31,16 @@
 - `allWarningsAsErrors.set(true)` is already on in `ferry/build.gradle.kts`. Unused imports, unused parameters, and deprecation warnings **fail the build**. Do not add an import you do not use.
 - **No Android APIs in any file in this plan.** Not `StatFs`, not `Context`, not `Log`. Every class here must be constructible and testable from a plain JVM unit test. `java.io.File.usableSpace` gives free space on Android and on the JVM, which is why `StatFs` is not needed.
 - **No WorkManager, no Service, no Compose, no dependency injection framework.** The two apps this library targets background work differently (MNN uses a foreground `Service`, Google's Gallery uses `CoroutineWorker`), so Ferry must have no opinion about backgrounding.
-- All suspend entry points take a `CoroutineDispatcher` parameter defaulting to `Dispatchers.IO`, so tests can inject a deterministic one.
-- Public API returns `Result<T>`. Do not throw across the public boundary.
+- Every class doing I/O is dispatcher-injectable: a `CoroutineDispatcher` constructor parameter defaulting to `Dispatchers.IO`. The `ModelRepo` interface itself declares no dispatcher — implementations own that choice.
+- Do not throw across the public boundary. Operations that can fail — anything doing I/O — return
+  `Result<T>`. Total functions that cannot fail return their value directly; wrapping a pure
+  computation in `Result` is noise, not safety.
 - Tests run with `./gradlew :ferry:testDebugUnitTest`.
 - Every commit message follows `<type>: <description>` with types from: feat, fix, refactor, docs, test, chore, perf, ci.
 
 ## Already Exists — Do Not Rewrite
 
-`ferry/src/main/java/io/github/nthuat/ferry/ResumableDownloader.kt` is written, committed, and covered by 11 tests in `ResumableDownloaderTest.kt`. Its public surface, which Task 4 consumes:
+`ferry/src/main/java/io/github/nthuat/ferry/ResumableDownloader.kt` is written, committed, and covered by 13 tests in `ResumableDownloaderTest.kt`. Its public surface, which Task 4 consumes:
 
 ```kotlin
 class ResumableDownloader(
@@ -628,7 +638,12 @@ rather than download failed."
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
-- Produces: `object Sha256` with `fun of(file: File): String` returning lowercase hex, and `fun matches(file: File, expectedHex: String): Boolean`.
+- Produces: `internal object Sha256` with `fun of(file: File): String` returning lowercase hex, and `fun matches(file: File, expectedHex: String): Boolean`.
+  `internal`, not public: this is a primitive used by `RepoDownloader`, not part of Ferry's API. Both
+  functions do file I/O and can throw, and the no-throw constraint governs the *public boundary* —
+  which is `RepoDownloader.download`, whose `catch (e: IOException)` is where those failures become a
+  `Result.failure`. Making it public would put a throwing I/O function on the API surface and oblige
+  it to return `Result<String>` for a caller that is already inside a try.
 
 **Background the implementer needs:**
 
@@ -734,7 +749,7 @@ import java.security.MessageDigest
  * Streams in fixed chunks because model files are gigabytes and reading one into memory to hash it
  * would exhaust the heap on exactly the devices that most need this to work.
  */
-object Sha256 {
+internal object Sha256 {
 
     private const val BUFFER_BYTES = 64 * 1024
 
@@ -1235,7 +1250,7 @@ Expected: FAIL — `nothing is committed when a file fails verification`. Restor
 If a mutation leaves the suite green, that guarantee is untested regardless of how many tests exist.
 Fix the test, not the mutation.
 
-Then re-run. Expected: PASS, 11 tests. Do not commit any mutation.
+Then re-run. Expected: PASS, 13 tests. Do not commit any mutation.
 
 - [ ] **Step 6: Commit**
 
@@ -1393,7 +1408,7 @@ Expected: PASS, 3 tests.
 - [ ] **Step 5: Run the whole suite**
 
 Run: `./gradlew :ferry:testDebugUnitTest`
-Expected: PASS. 11 pre-existing `ResumableDownloaderTest` tests plus 39 added by this plan.
+Expected: PASS. 13 pre-existing `ResumableDownloaderTest` tests plus 39 added by this plan.
 
 - [ ] **Step 6: Update the README status block**
 
@@ -1577,13 +1592,14 @@ class EmbeddabilityTest {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run the tests — expect green, and do not treat that as proof**
 
 Run: `./gradlew :ferry:testDebugUnitTest --tests "*EmbeddabilityTest*"`
 Expected: PASS, both tests, if Task 5 was implemented correctly.
 
-**A green here is not proof.** These are characterization tests over behaviour that should already
-hold, so the red comes from step 3 instead.
+This step is deliberately not a red step. These are characterization tests over behaviour that
+should already hold after Task 5, so there is nothing to implement and nothing to fail. Their red
+comes from step 3's mutation instead, which is what actually proves they can fail.
 
 - [ ] **Step 3: Prove the client test can fail**
 

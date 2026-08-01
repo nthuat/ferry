@@ -2,14 +2,25 @@
 
 Downloads AI model repositories to Android devices, and refuses to do it badly.
 
-> **Status: early.** The transport layer is written and tested. Repository semantics, verification
-> and the Android integration are not done yet. Not published to Maven, not ready to use.
+> **Status: core works.** Fetches a HuggingFace repo, refuses to start without the disk space to
+> finish it, and verifies every published SHA-256 before committing anything. Backgrounding, pause,
+> resume-across-launch and a second hub are not done. Not published to Maven.
 
 ```kotlin
-Ferry.to(context.filesDir)
-    .from(HuggingFace)
-    .fetch("google/gemma-2-2b-it")
-    .collect { progress -> … }
+val ferry = Ferry.huggingFace()
+
+ferry.download("google/gemma-2-2b-it", context.filesDir) { progress ->
+    when (progress) {
+        is RepoProgress.CheckingSpace -> …
+        is RepoProgress.Downloading -> …
+        is RepoProgress.Verifying -> …
+        is RepoProgress.Complete -> …
+    }
+}.onFailure { error ->
+    if (error is InsufficientSpaceException) {
+        // "needs 4.1 GB, 2.3 GB free" — before a single byte was transferred
+    }
+}
 ```
 
 ## Why this exists
@@ -37,13 +48,41 @@ Not a feature list. Promises the implementation holds and the tests enforce.
 | 1 | **Never a partial model** | files land one by one and a loader picks up a half-written repo |
 | 2 | **Never a corrupt model** | trusting a `200`, or verifying against the wrong hash |
 | 3 | **Never starts what can't finish** | 4 GB model onto 3 GB free, failing at 91% |
-| 4 | **Always resumable** | progress kept in memory, or keyed to a version code |
+| 4 | **Resumable within one download attempt** | progress kept in memory, or keyed to a version code |
 
 Guarantee 3 is the one neither reference implementation has.
 
-## Two things about HuggingFace worth knowing
+Guarantee 4 is scoped, and the scope is the honest part. A dropped connection is recovered from
+mid-attempt via `Range`, and a file already on disk and verifying is not fetched again. Resume across
+process death is **not** implemented: the staging directory is deleted in a `finally` block so a
+failure can never leave a half-repo behind, which forfeits the partial files with it. A failed
+attempt therefore restarts from byte zero. Making both true at once needs persisted state and is a
+later phase.
 
-Both verified against the live API, and both cost you a day if you meet them by surprise.
+## Three things about HuggingFace worth knowing
+
+All verified against the live API, and each costs you a day if you meet it by surprise.
+
+### The listing is neither recursive nor complete by default
+
+`/tree/main` returns the top level only, and one page of at most 1000 entries.
+
+```
+/tree/main                    stabilityai/stable-diffusion-xl-base-1.0 → 10 files
+/tree/main?recursive=true     the same repo                            → 57 files
+```
+
+Miss `recursive=true` and a repo with `unet/`, `vae/` or `onnx/` subtrees downloads as a fraction of
+itself that still looks complete. Then, past 1000 entries, the response carries a `Link` header:
+
+```
+link: <…/tree/main?expand=false&recursive=true&limit=1000&cursor=ZXlKbWFX…>; rel="next"
+```
+
+`google/gemma-scope-9b-pt-res` is 1000 entries then 724. Follow the URL exactly as given rather than
+rebuilding it — the cursor is opaque. But **check its host before following it**: it is the one
+request target that comes from the response rather than from your own code, and a hub that can name
+an arbitrary address gets to point your HTTP client at one.
 
 ### The ETag you get is not the ETag you want
 
@@ -121,7 +160,7 @@ HuggingFace is implemented. The other two are checked against their live APIs, n
 
 | | HuggingFace | ModelScope | Ollama |
 |---|---|---|---|
-| Listing | `/api/models/{id}/tree/main` | `/api/v1/models/{id}/repo/files?Revision=master` | `/v2/library/{id}/manifests/{tag}` |
+| Listing | `/api/models/{id}/tree/main?recursive=true` | `/api/v1/models/{id}/repo/files?Revision=master` | `/v2/library/{id}/manifests/{tag}` |
 | Auth to list | none | none | none |
 | File identity | `path` | `Path` | **none — digest only** |
 | File type field | `type == "file"` | `Type == "blob"` | every layer is a file |
