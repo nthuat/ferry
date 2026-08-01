@@ -630,6 +630,48 @@ class RepoDownloaderTest {
         assertFalse("must not write outside the staging directory", escaped.exists())
     }
 
+    /**
+     * End-to-end version of `HuggingFaceTest`'s equivalent, wired through the real adapter rather
+     * than `fakeRepo`. Proves the whole pipeline fails at `repo.manifest(repoId)`, the very first
+     * line of `download()`, so the escaped URL is never fetched and no second request happens —
+     * asserted on `server.requestCount`, not only on the `Result`.
+     *
+     * Revert-checked and found **not to isolate `HuggingFace`'s new namespace check specifically**:
+     * with that check disabled, this test still passes, because `resolveInside(stagingDir,
+     * remote.path)` below independently refuses the same `path` on the filesystem side first —
+     * for this exact leading-`..` shape, both checks trip at the first `..` token, so either alone
+     * is currently sufficient. The isolating proof that `HuggingFace.manifest()`'s own check does
+     * its job independently of `RepoDownloader` is
+     * `HuggingFaceTest`'s `a manifest file path that traverses out of the resolve namespace fails
+     * the whole manifest call`, which calls `manifest()` directly with no `resolveInside` in the
+     * picture at all. Kept here anyway as an end-to-end regression pin: the two checks guard
+     * different layers (network request vs. filesystem write) that happen to agree today only
+     * because of how deep `stagingDir` and the URL's own prefix each are — not because either was
+     * designed to cover the other, so nothing keeps that agreement from drifting apart later.
+     */
+    @Test
+    fun `a hub-supplied file path that traverses out of HuggingFace's resolve namespace is refused before any download request`() {
+        val hf = HuggingFace(OkHttpClient(), baseUrl = server.url("/").toString().trimEnd('/'))
+        val evilPath = "../../../../other/repo/resolve/main/secret.bin"
+        server.enqueue(
+            MockResponse().setBody("""[ { "type": "file", "path": "$evilPath", "size": 5 } ]"""),
+        )
+        val downloader = RepoDownloader(
+            repo = hf,
+            downloader = ResumableDownloader(OkHttpClient()),
+            spaceCheck = SpaceCheck(probe = { Long.MAX_VALUE }, headroomBytes = 0L),
+        )
+
+        val result = runBlocking { downloader.download("owner/model", temp.root) }
+
+        assertTrue(result.isFailure)
+        assertEquals(
+            "only the tree listing may be requested, never the escaped file",
+            1,
+            server.requestCount,
+        )
+    }
+
     /** The escape check must reject only real escapes, not ordinary subdirectories within a repo. */
     @Test
     fun `a file path containing a legitimate subdirectory still downloads`() {

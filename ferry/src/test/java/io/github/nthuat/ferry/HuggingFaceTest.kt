@@ -260,6 +260,39 @@ class HuggingFaceTest {
     }
 
     /**
+     * The other half of docs/known-limitations.md's `..` entry, closed alongside the repoId one: a
+     * manifest entry's own `path` comes from the hub's response, not from `repoId`, and is appended
+     * after `resolve/main` in `downloadUrl`. A `path` of
+     * `"../../../../other/repo/resolve/main/secret.bin"` pops `main`, `resolve` and both of
+     * `repoId`'s own segments away, retargeting the download at a different repo's file on this same
+     * origin entirely — confirmed empirically before this fix existed. `requireWithinNamespace` now
+     * catches it at manifest-build time, so the whole call fails before any `RemoteFile` carrying
+     * that URL is ever handed back to a caller.
+     *
+     * Legitimate nesting is proven not to be rejected by the existing, unchanged
+     * `a nested file path produces a download url with the nesting preserved as real path segments`
+     * test just above, which already exercises this same, now-checked code path and still passes.
+     */
+    @Test
+    fun `a manifest file path that traverses out of the resolve namespace fails the whole manifest call`() {
+        val evilPath = "../../../../other/repo/resolve/main/secret.bin"
+        server.enqueue(
+            MockResponse().setBody("""[ { "type": "file", "path": "$evilPath", "size": 5 } ]"""),
+        )
+
+        val result = runBlocking { repo.manifest("owner/model") }
+
+        assertTrue(
+            "must fail rather than hand back a RemoteFile pointing outside the resolve namespace",
+            result.isFailure,
+        )
+        // manifest() never issues a request for a per-file download URL itself - it only computes
+        // the string - so this is 1 (the tree listing) regardless of this fix. Asserted anyway: it
+        // is what "no download request issued" actually means at this layer, and it costs nothing.
+        assertEquals(1, server.requestCount)
+    }
+
+    /**
      * A page caps at 1000 entries and points at the next with a Link header. Verified live:
      * google/gemma-scope-9b-pt-res answers 1000 entries with a rel="next" link, and that link
      * answers 724 with none — 1724 in total. Consuming one page lists a fraction of the repo,

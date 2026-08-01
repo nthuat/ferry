@@ -145,6 +145,13 @@ class ModelScope(
      * `api/v1/models` precedes [repoId] here exactly as it does in [manifest]'s listing URL — unlike
      * [HuggingFace]'s own `downloadUrl`, where [repoId] is the first thing appended and there is no
      * fixed prefix to protect — so the same [requireWithinNamespace] check applies to this URL too.
+     *
+     * [path] itself needs no such check here, unlike [HuggingFace]'s equivalent: it travels through
+     * `addQueryParameter`, which treats it as an opaque value to percent-encode, never as path
+     * segments to resolve `..` against — confirmed empirically, a [path] of
+     * `"../../../../other/repo/resolve/main/secret.bin"` round-trips into `FilePath` unchanged and
+     * `pathSegments` stays exactly `api/v1/models/{repoId}/repo`, regardless of what [path] contains.
+     * `HuggingFace` puts its per-file path in the URL path instead, which is what exposes it there.
      */
     private fun downloadUrl(base: HttpUrl, repoId: String, path: String): String = base.newBuilder()
         .addPathSegments("api/v1/models")

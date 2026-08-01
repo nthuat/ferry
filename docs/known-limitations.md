@@ -108,7 +108,14 @@ with no error at any layer. A repo of that size would settle the question either
 `files` list confirms a cap, and a complete one across a genuinely large repo would be the first real
 evidence against one.
 
-## Closed: a repo id containing `..` retargeting the request to an arbitrary path
+## Closed: `..` retargeting a request to an arbitrary path — both the caller-supplied repo id and the hub-supplied file path
+
+This has two halves, closed by the same mechanism at different call sites: a `repoId` the *calling
+app* supplies, and a per-file `path` the *hub's own manifest* supplies. The second is the more serious
+of the two — a hostile or compromised hub reaches it, not just a careless caller — and was found while
+closing the first, not named up front.
+
+### Half 1: `repoId`
 
 Was: both `HuggingFace` and `ModelScope` build their listing and download URLs from a caller-supplied
 `repoId` via `HttpUrl.Builder.addPathSegments`, which resolves a `.` or `..` path segment by popping
@@ -118,41 +125,76 @@ the request to `{baseUrl}/etc/passwd/...` instead of staying inside the models n
 the hub's own origin, but able to aim a `GET` at any path under it, not only ones inside that
 namespace.
 
-**Closed by a structural check on the output, not the input.** Each adapter now asserts, on the built
-`HttpUrl` and before the request is issued, that `pathSegments` still starts with the adapter's own
-literal namespace prefix (`api/models` for `HuggingFace`, `api/v1/models` for `ModelScope`) —
-`HuggingFace.requireWithinNamespace` / `ModelScope.requireWithinNamespace`. If it does not, the
+**Closed by a structural check on the output, not the input.** Each adapter asserts, on the built
+`HttpUrl` and before the request is issued, that `pathSegments` still starts with the intended prefix
+— `HuggingFace.requireWithinNamespace` / `ModelScope.requireWithinNamespace`. If it does not, the
 request is never sent and `manifest` returns `Result.failure`.
 
-Applied at every URL site where a fixed adapter-owned prefix actually precedes `repoId` in the
-builder chain: `HuggingFace`'s tree-listing URL, and both of `ModelScope`'s URLs (listing and
-download — both build `api/v1/models` before `repoId`, so both carry the same exposure and the same
-fix). **Not applied** to `HuggingFace`'s own download (`resolve/main`) URL: there, `repoId` is the
-*first* thing appended to `baseUrl`, with no fixed literal prefix ahead of it for `..` to pop —
-confirmed directly against okhttp 4.12.0, `"../../etc/passwd"` resolves there to
-`{baseUrl}/etc/passwd/resolve/main/{path}`, never escaping outside a `{repoId}/resolve/main/{path}`
-shape, because `resolve/main` and the file path are pushed by later, independent
-`addPathSegments` calls that nothing processed earlier can reach back and pop. There is no prefix
-there to assert; see the KDoc on `HuggingFace`'s private `downloadUrl` for the full argument.
+Applied to `HuggingFace`'s tree-listing URL and both of `ModelScope`'s URLs (listing and download —
+both build `api/v1/models` before `repoId`) against a literal constant prefix (`api/models` /
+`api/v1/models`). **Not meaningfully exposed** on `HuggingFace`'s own download (`resolve/main`) URL via
+`repoId` specifically: there, `repoId` is the *first* thing appended to `baseUrl`, with no fixed
+literal prefix ahead of it for `repoId`'s own `..` to pop — confirmed directly against okhttp 4.12.0,
+a malicious `repoId` alone resolves there to `{baseUrl}/etc/passwd/resolve/main/{path}`, never
+escaping outside a `{repoId}/resolve/main/{path}` shape, because `resolve/main` and the file path are
+pushed by later, independent `addPathSegments` calls that nothing processed earlier can reach back and
+pop. See Half 2 below for what *is* exposed at that same call site.
+
+### Half 2: the hub's own per-file `path`
+
+Found while closing Half 1, not by a separate report: `HuggingFace.downloadUrl` appends the per-file
+`path` — from the hub's manifest response, over the network, the same untrusted source
+`RepoDownloader`'s own comments already call out for `remote.path` on the filesystem side — *after*
+`{repoId}/resolve/main` is already fixed. A `path` of
+`"../../../../other/repo/resolve/main/secret.bin"` pops `main`, `resolve`, and both of `repoId`'s own
+segments away, retargeting the *download* at a different repo's file on the same origin entirely —
+confirmed empirically, not just argued. Anyone can publish a repo on HuggingFace, so this is reachable
+by a hostile repo, not only a careless caller: the fetch is issued with the host app's own
+`OkHttpClient`, carrying whatever auth that client attaches.
+
+**Closed the same way as Half 1, at the same call site, against a computed rather than literal
+prefix.** `HuggingFace.downloadUrl` now builds `{repoId}/resolve/main` first, asserts the full URL
+(with `path` appended) still starts with exactly that, then appends `path`. The prefix is computed
+per call instead of a constant because `repoId`'s own contribution varies — but it is still known at
+build time, before the request is issued, which is what keeps this an output assertion rather than an
+input check. `repoId`'s own `..` cannot fail this check (Half 1's finding: nothing precedes it here to
+pop), so in practice this check's entire effect is against `path`. `ModelScope` needs no equivalent:
+its per-file path travels through `addQueryParameter`, an opaque, percent-encoded value with no
+segment-popping semantics — confirmed empirically that the same malicious `path` round-trips there
+unchanged and `pathSegments` is unaffected.
+
+**Relationship to `RepoDownloader.resolveInside`, checked, not assumed:** `resolveInside(stagingDir,
+remote.path)` already guards the *filesystem* destination built from the same `path`, before
+`downloader.download(url = remote.url, ...)` is called — so today, for this exact attack shape (a
+`path` of leading `..` segments), the network request was already never issued even before this fix,
+confirmed by reverting the new check and rerunning `RepoDownloaderTest`'s end-to-end case: it still
+passed, on `resolveInside` alone. That is incidental, not designed: `resolveInside`'s boundary
+(`stagingDir`, a filesystem path whose depth is `into` plus a fixed few segments) and the URL's
+boundary (`{repoId}/resolve/main`, unrelated to `into` entirely) are checked by two different
+algorithms over two different notions of "prefix," which happen to both be maximally sensitive to a
+leading `..` today. Nothing keeps them agreeing if either shape changes later — this fix makes the URL
+correct on its own terms, independent of whatever the filesystem side does.
+
+### The original reasoning, and the residual
 
 **The original reasoning for not fixing this conflated two different kinds of check.** The `?`/`&`/`#`
 half of that reasoning still stands, unchanged, in both adapters' KDoc: a client-side shape check on
 `repoId` text is a denylist, and the hub alone is the authority on which ids are valid, so rejecting a
 character up front goes stale the moment the hub widens its own rules. That argument is sound for
-`?`/`&`/`#` — there genuinely is no way to check them except by inspecting `repoId`'s own text — and it
-was wrong to extend to `..`, because `..` was never an input-shape question. `HttpUrl.Builder` doesn't
-reject a request over `..`; it silently *resolves* it, popping real segments the way it always does.
-The fix available for that isn't a better denylist, it's a check on what the builder produced: does
-the URL this code built still point at the namespace this code meant it to. That says nothing about
-which `repoId`s are legal — it cannot go stale as the hub's id rules evolve, because it was never a
-claim about `repoId` at all.
+`?`/`&`/`#` — there genuinely is no way to check them except by inspecting the input's own text — and
+it was wrong to extend to `..`, because `..` was never an input-shape question, for `repoId` or for
+`path`. `HttpUrl.Builder` doesn't reject a request over `..`; it silently *resolves* it, popping real
+segments the way it always does. The fix available for that isn't a better denylist, it's a check on
+what the builder produced: does the URL this code built still point at the namespace this code meant
+it to. That says nothing about which `repoId`s or `path`s are legal — it cannot go stale as the hub's
+own rules evolve, because it was never a claim about either.
 
-**Residual:** a `repoId` containing `..` that resolves to a *legitimate*-looking path still inside the
-namespace (vanishingly unlikely in practice, and would need to reconstruct a real two-or-more-segment
-id via cancellation) is not distinguished from an ordinary id — this check only catches an escape from
+**Residual:** an input containing `..` that resolves to a *legitimate*-looking path still inside the
+intended namespace (vanishingly unlikely in practice, and would need to reconstruct a real path via
+exact cancellation) is not distinguished from an ordinary one — this check only catches an escape from
 the namespace, not a same-namespace collision. Not treated as a gap worth closing: it is exactly as
-reachable, and exactly as consequential, as a caller directly passing that reconstructed id in the
-first place.
+reachable, and exactly as consequential, as a caller or hub directly supplying that reconstructed value
+in the first place.
 
 ## Free space is probed at the nearest existing ancestor, not the directory asked about
 
