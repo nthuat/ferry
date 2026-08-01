@@ -218,6 +218,34 @@ class HuggingFaceTest {
     }
 
     /**
+     * `;` is a legal sub-delimiter inside a URL's own path, not only a parameter separator, so
+     * anchoring the match to "right after any `;`" was not enough on its own: `<.../x;rel=next>;
+     * rel="prev"` still has a `;` immediately before the impostor, with no `?` in sight. Excluding
+     * the URI-Reference from the match entirely — matching only what follows its closing `>` — is
+     * what actually closes this, regardless of whether the impostor sits in a query or a bare path.
+     */
+    @Test
+    fun `a prev link with a semicolon before rel=next inside its own url is not treated as next`() {
+        server.enqueue(
+            MockResponse()
+                .setBody("""[ { "type": "file", "path": "page1.bin", "size": 10 } ]""")
+                .addHeader("Link", "<${server.url("/page1;rel=next")}>; rel=\"prev\""),
+        )
+        server.enqueue(
+            MockResponse().setBody("""[ { "type": "file", "path": "page2.bin", "size": 20 } ]"""),
+        )
+
+        val manifest = runBlocking { repo.manifest("owner/model") }.getOrThrow()
+
+        assertEquals(
+            "a prev link must never be followed as though it were next",
+            listOf("page1.bin"),
+            manifest.files.map { it.path },
+        )
+        assertEquals("the prev link's own url must never be requested", 1, server.requestCount)
+    }
+
+    /**
      * The next-page URL is chosen by the server — the one request target in this adapter that comes
      * from a response rather than from the caller. Following it as given would let a compromised hub
      * aim the host app's own OkHttpClient at any address it names, an internal one included.

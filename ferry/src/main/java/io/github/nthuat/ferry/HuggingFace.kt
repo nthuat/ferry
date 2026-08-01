@@ -111,9 +111,14 @@ class HuggingFace(
      * never iterates, never downloads and never checks. Accepting both the quoted and the unquoted
      * rel, and reading repeated header fields at the call site, is what keeps that unreachable
      * against a hub that changes its header formatting.
+     *
+     * NEXT_REL is matched only against the text after the URI-Reference's closing `>`, not the
+     * whole segment. `;` is a legal character inside a URL's own path or query — `<.../x;rel=next>;
+     * rel="prev"` — so anchoring the regex to "right after a `;`" is not enough on its own: the
+     * URL's own text has to be out of scope before the anchor ever sees it.
      */
     private fun nextLink(header: String): String? = header.split(',')
-        .firstOrNull { NEXT_REL.containsMatchIn(it) }
+        .firstOrNull { NEXT_REL.containsMatchIn(it.substringAfter('>', "")) }
         ?.substringAfter('<', "")
         ?.substringBefore('>', "")
         ?.trim()
@@ -168,10 +173,12 @@ class HuggingFace(
          * `rel="next"`, or the unquoted `rel=next` that RFC 8288 also permits. The trailing
          * lookahead is what stops this matching `rel=nextpage`.
          *
-         * Anchored to `;` (a parameter boundary) or the start of the segment so this only matches
-         * the actual `rel` attribute, never a `rel=next` that happens to appear inside the URL
-         * itself — a `prev` link whose own target carries an ordinary `?rel=next` query parameter
-         * would otherwise read as `rel="next"` regardless of what its real rel attribute says.
+         * Anchored to `;` or the start of the string — but that anchor alone is not sufficient,
+         * because `;` is a legal sub-delimiter inside a URL's own path or query, not only a
+         * parameter separator: `<.../x;rel=next>; rel="prev"` still has a `;` sitting right before
+         * the impostor. What actually keeps this to the real `rel` attribute is the call site
+         * (`nextLink`) testing this only against the text after the URI-Reference's closing `>`, so
+         * the URL's own text is out of scope before this regex ever runs against it.
          */
         val NEXT_REL = Regex("""(?:^|;)\s*rel="?next"?(?![\w-])""")
 
