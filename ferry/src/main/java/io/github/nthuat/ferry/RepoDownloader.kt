@@ -217,15 +217,15 @@ class RepoDownloader(
                 // because into/owner/model does not exist yet when it commits. A later
                 // download("owner") would otherwise sail past the check above — its own marker
                 // still matches — and deleteRecursively() would take the nested repo with it. Any
-                // .ferry strictly below target, at any depth, is such a nested repo, so it is
-                // refused before the delete rather than let the delete run.
+                // .ferry strictly below target, at any depth, is refused before the delete rather
+                // than risk that: usually a real nested repo, but not provably so — a manifest can
+                // declare an ordinary file at that same name (docs/known-limitations.md) — so the
+                // message below states only what is actually known, not which case this is.
                 val nested = target.walkTopDown()
                     .firstOrNull { it.isFile && it.name == MARKER_FILE && it != marker }
                 if (nested != null) {
                     throw IOException(
-                        "$target contains ${nested.parentFile}, a repo committed by Ferry " +
-                            "separately; refusing to replace $target — remove the nested repo " +
-                            "directory first",
+                        "$target contains $nested; refusing to replace it — remove $nested first",
                     )
                 }
 

@@ -342,6 +342,52 @@ class RepoDownloaderTest {
     }
 
     /**
+     * Documented, not fixed, in docs/known-limitations.md: a manifest that declares a file literally
+     * named ".ferry" inside a subdirectory makes that repo unreplaceable afterwards. The nested-
+     * marker check above cannot tell this file apart from a real nested repo's marker —
+     * distinguishing them is exactly the kind of cleverness this codebase does not attempt — so once
+     * such a repo commits, any later replace attempt hits the same refusal a real nested repo would.
+     *
+     * This test pins that consequence in place rather than testing for a bug: if a future change
+     * makes such a repo silently replaceable again, this goes red and the doc entry is caught
+     * quietly going out of date instead of just being trusted.
+     */
+    @Test
+    fun `a manifest-declared file literally named ferry in a subdirectory is a documented limitation`() {
+        val notAMarker = "not a marker, just a downloaded file"
+        val first = listOf(
+            remote("config.json", configBody.length.toLong()),
+            remote("sub/.ferry", notAMarker.length.toLong()),
+        )
+        server.enqueue(MockResponse().setBody(configBody))
+        server.enqueue(MockResponse().setBody(notAMarker))
+        val committed = runBlocking { downloaderFor(first).download("owner", temp.root) }.getOrThrow()
+
+        // A different manifest for the same id, so the cache check at the top of download() misses
+        // and this call reaches the commit step instead of returning the already-satisfied
+        // directory untouched.
+        val otherBody = configBody + "-different"
+        val second = listOf(
+            remote("config.json", otherBody.length.toLong()),
+            remote("sub/.ferry", notAMarker.length.toLong()),
+        )
+        server.enqueue(MockResponse().setBody(otherBody))
+        server.enqueue(MockResponse().setBody(notAMarker))
+        val result = runBlocking { downloaderFor(second).download("owner", temp.root) }
+
+        assertTrue(
+            "a file named .ferry in a subdirectory makes the repo unreplaceable — documented, " +
+                "not a bug",
+            result.isFailure,
+        )
+        assertEquals(
+            "the original commit must survive the refused replace",
+            configBody,
+            File(committed, "config.json").readText(),
+        )
+    }
+
+    /**
      * A directory Ferry did not write — the user's own files, another tool's output — carries no
      * ownership marker, so the commit step must refuse it rather than delete it to make room.
      */
