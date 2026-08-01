@@ -136,6 +136,23 @@ class HuggingFaceTest {
     }
 
     /**
+     * HuggingFace serves single-segment canonical models with no owner — `gpt2`, `bert-base-uncased`
+     * — alongside `owner/name` ones. `addPathSegments(repoId)` must add exactly one path segment for
+     * these, not drop the id or split on some other character, since there is no `/` to split on.
+     */
+    @Test
+    fun `a single-segment canonical repo id produces one path segment, not a split or dropped id`() {
+        server.enqueue(MockResponse().setBody(treeJson))
+
+        runBlocking { repo.manifest("gpt2") }
+
+        assertEquals(
+            "/api/models/gpt2/tree/main?recursive=true",
+            server.takeRequest().path,
+        )
+    }
+
+    /**
      * Unlike the denylist this used to be, none of `?`, `#` or `&` is rejected here: `?` and `#`
      * travel through addPathSegments and come out percent-encoded, and `&` comes out as an inert
      * literal character — a path segment has no structural meaning for `&` the way a query string
@@ -186,6 +203,24 @@ class HuggingFaceTest {
 
         assertTrue(
             weights.url.endsWith("/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/model.safetensors"),
+        )
+    }
+
+    /**
+     * `entry.path` for a nested file already contains its own "/" — "onnx/model.onnx", present in
+     * `treeJson` for exactly this reason. `addPathSegments(path)` must split that into two real path
+     * segments the same way it splits `repoId`, not fold it into one opaque, percent-encoded segment
+     * (`onnx%2Fmodel.onnx`), which would 404 against a hub that expects an actual nested path.
+     */
+    @Test
+    fun `a nested file path produces a download url with the nesting preserved as real path segments`() {
+        server.enqueue(MockResponse().setBody(treeJson))
+
+        val manifest = runBlocking { repo.manifest("Qwen/Qwen2.5-0.5B-Instruct") }.getOrThrow()
+        val nested = manifest.files.single { it.path == "onnx/model.onnx" }
+
+        assertTrue(
+            nested.url.endsWith("/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/onnx/model.onnx"),
         )
     }
 
