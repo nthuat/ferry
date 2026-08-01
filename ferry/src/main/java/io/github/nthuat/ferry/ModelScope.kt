@@ -39,10 +39,12 @@ class ModelScope(
             val base = baseUrl.toHttpUrlOrNull()
                 ?: return@withContext Result.failure(IOException("invalid base URL: $baseUrl"))
 
-            // repoId travels through addPathSegments rather than string interpolation, so a "?", "#"
-            // or "&" inside it is percent-encoded as ordinary segment text instead of being
-            // reinterpreted as a query or fragment delimiter — pinned by ModelScopeTest against the
-            // actual request produced, not just argued for here. HuggingFace originally built its URL
+            // repoId travels through addPathSegments rather than string interpolation, so a "?" or
+            // "#" inside it is percent-encoded into inert segment text, and a "&" is left as a literal
+            // character that is inert for a different reason: a path segment has no structural meaning
+            // for "&" the way a query string does. None of the three can be reinterpreted as a query
+            // or fragment delimiter — pinned by ModelScopeTest against the actual request produced,
+            // not just argued for here. HuggingFace originally built its URL
             // by string interpolation and had to reject those characters up front with a denylist for
             // exactly this reason; it has since converted to this same typed-API approach and dropped
             // that denylist (see HuggingFace.manifest's own comment for that history), rather than

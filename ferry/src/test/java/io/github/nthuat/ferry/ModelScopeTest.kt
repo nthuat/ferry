@@ -116,11 +116,13 @@ class ModelScopeTest {
     }
 
     /**
-     * Unlike HuggingFace, a delimiter character here is not rejected: it travels through
-     * addPathSegments, which percent-encodes it into inert path-segment text instead of letting it
-     * reinterpret as a query or fragment delimiter (see the KDoc on `ModelScope.manifest` for why no
-     * pre-check exists). Proven here against the actual request produced, not by argument — this is
-     * the same repoId shape HuggingFaceTest rejects outright; this adapter instead sends it safely.
+     * Unlike HuggingFace's old denylist, none of `?`, `#` or `&` is rejected here: `?` and `#` travel
+     * through addPathSegments and come out percent-encoded, and `&` comes out as an inert literal
+     * character — a path segment has no structural meaning for `&` the way a query string does —
+     * rather than any of the three reinterpreting as a query or fragment delimiter (see the KDoc on
+     * `ModelScope.manifest` for why no pre-check exists). Proven here against the actual request
+     * produced, not by argument — this is the same repoId shape `HuggingFaceTest`'s equivalent test
+     * exercises; both adapters now send it safely.
      */
     @Test
     fun `a repo id containing url delimiters is percent-encoded rather than reshaping the request`() {

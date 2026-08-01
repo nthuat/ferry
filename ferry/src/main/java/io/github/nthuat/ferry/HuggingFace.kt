@@ -30,10 +30,12 @@ class HuggingFace(
                 ?: return@withContext Result.failure(IOException("invalid base URL: $baseUrl"))
 
             val entries = mutableListOf<TreeEntry>()
-            // repoId travels through addPathSegments rather than string interpolation, so a "?", "#"
-            // or "&" inside it is percent-encoded as ordinary segment text instead of being
-            // reinterpreted as a query or fragment delimiter — pinned by HuggingFaceTest against the
-            // actual request produced, not just argued for here.
+            // repoId travels through addPathSegments rather than string interpolation, so a "?" or
+            // "#" inside it is percent-encoded into inert segment text, and a "&" is left as a literal
+            // character that is inert for a different reason: a path segment has no structural meaning
+            // for "&" the way a query string does. None of the three can be reinterpreted as a query
+            // or fragment delimiter — pinned by HuggingFaceTest against the actual request produced,
+            // not just argued for here.
             //
             // This replaces what used to be a denylist (URL_DELIMITERS) rejecting those three
             // characters outright, which named the bad character in the error immediately. That
@@ -178,9 +180,10 @@ class HuggingFace(
      * Where to fetch [path] from, inside [repoId], at the `main` revision.
      *
      * Mirrors [ModelScope]'s private `downloadUrl`: built with [HttpUrl.Builder] rather than
-     * interpolated into a string, so a `repoId` or `path` containing `?`, `#` or `&` is
-     * percent-encoded into inert path-segment text instead of reinterpreting as a query or fragment
-     * delimiter.
+     * interpolated into a string, so a `?` or `#` in [repoId] or [path] is percent-encoded into inert
+     * segment text, and a `&` is left as a literal character that is inert for a different reason — a
+     * path segment has no structural meaning for `&` the way a query string does. None of the three
+     * can be reinterpreted as a query or fragment delimiter.
      */
     private fun downloadUrl(base: HttpUrl, repoId: String, path: String): String = base.newBuilder()
         .addPathSegments(repoId)
