@@ -62,5 +62,5 @@ what `EmbeddabilityTest` exists to protect. That test compiles against module so
 under `implementation` too, so it cannot catch a regression. Proving it needs a consumer project
 built against the published artifact, and nothing is published yet.
 
-**Cheap partial fix:** assert in `checkEmbeddable` that the `api` configuration contains okhttp and
-coroutines.
+**Cheap partial fix, done:** `checkEmbeddable` asserts that the `api` configuration's dependencies
+include okhttp and a module exporting `CoroutineDispatcher`.
