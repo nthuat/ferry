@@ -6,37 +6,22 @@ makes it reachable, so the next person can tell whether their change makes it wo
 This exists because the review record that produced it lives in a git-ignored scratch directory that
 gets deleted. A limitation nobody wrote down is a limitation nobody knows they inherited.
 
-## One repo id can delete another, in one specific order
+## A manifest that declares a file literally named `.ferry` inside a subdirectory
 
-Commit `owner/model`, then commit `owner`, then re-download `owner` after a cache miss. `owner`'s
-target directory *contains* `owner/model`, its own `.ferry` marker matches, so the commit step's
-`deleteRecursively()` takes the inner repo with it — and returns `Result.success`.
+The nested-repo guard refuses to replace a target directory when any `.ferry` file exists anywhere
+in its subtree other than `target/.ferry` itself. That guard is what stops one committed repo id
+from deleting another nested inside it (`owner` containing `owner/model`). It cannot tell a real
+marker apart from an ordinary downloaded file that merely happens to share the name — distinguishing
+them is exactly the kind of cleverness this codebase has been bitten by before, so it does not try.
 
-The reverse order is refused: an outer directory Ferry did not write has no marker, so it is not
-deleted. That half is tested (`an outer repo id is refused when the inner repo was committed first`).
+**Condition:** a hub's manifest lists a file whose path is `<subdirectory>/.ferry` (not at the repo
+root — a root-level `.ferry` entry is overwritten by Ferry's own marker write, which always lands
+last). Once such a repo commits, any later attempt to replace it — a failed cache check, a
+corrupted file, a re-download — hits the nested-marker check and is refused.
 
-**Why it is not fixed:** unreachable through the shipped HuggingFace adapter. HuggingFace serves
-models and owners from one namespace, so a bare id that resolves is a canonical model and no owner
-shares the name — checked live: `Qwen`, `openai` and `google` all return 401, while `gpt2` redirects
-to `openai-community/gpt2`. The precondition cannot be constructed, not merely is unlikely.
-
-**Revisit before:** adding any second hub. ModelScope's namespace rules are different and unverified.
-Also reachable without a prefix id at all if a caller ever passes an `into` directory that sits inside
-another call's committed target.
-
-**Known fix:** refuse the delete when any `.ferry` exists strictly below `target`.
-
-## The next-page matcher is not anchored to the `rel=` attribute
-
-`NEXT_REL` is matched with `containsMatchIn` against a whole Link segment including its URL, so a
-`prev` link whose own URL carries an ordinary `?rel=next` query parameter is misidentified as the
-next page.
-
-**Bounded by:** the extracted URL still has to clear the scheme+host+port origin check, so this can
-at most cause an out-of-turn same-origin fetch. A hostile same-origin hub already has that capability
-for free by putting a genuine `rel="next"` on any URL it likes, so nothing new is granted.
-
-**Known fix:** anchor the match to a `;`-or-segment-start boundary.
+**Consequence:** the same terminal state as the existing no-marker refusal. There is no API to clear
+it; the error message names the offending `.ferry` file and says to remove it first. Neither
+HuggingFace nor ModelScope publishes a file named `.ferry`.
 
 ## A file declared with size 0 is verified by nothing
 
@@ -77,5 +62,5 @@ what `EmbeddabilityTest` exists to protect. That test compiles against module so
 under `implementation` too, so it cannot catch a regression. Proving it needs a consumer project
 built against the published artifact, and nothing is published yet.
 
-**Cheap partial fix:** assert in `checkEmbeddable` that the `api` configuration contains okhttp and
-coroutines.
+**Cheap partial fix, done:** `checkEmbeddable` asserts that the `api` configuration's dependencies
+include okhttp and a module exporting `CoroutineDispatcher`.

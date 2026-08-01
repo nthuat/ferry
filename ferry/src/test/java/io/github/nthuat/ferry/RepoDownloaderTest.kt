@@ -281,11 +281,11 @@ class RepoDownloaderTest {
      * committed into/owner/model, and the commit step's deleteRecursively() would take it along.
      * What saves it here is the ownership marker: into/owner has none, so the commit is refused.
      *
-     * **The reverse order is a known, accepted gap and is not tested because it is not fixed.**
-     * Commit "owner" first, then "owner/model", then re-download "owner" after a cache miss, and
-     * into/owner *does* carry a marker naming "owner" — the commit deletes it recursively and the
-     * inner repo goes with it. Closing that needs the commit step to know about repos nested under
-     * the one it is replacing, which is deliberately out of scope for this phase.
+     * The reverse order — commit "owner" first, then "owner/model", then re-download "owner" after
+     * a cache miss — used to be a known, accepted gap: into/owner *does* carry a marker naming
+     * "owner", and the commit deleted it recursively, taking the inner repo along. Closed by the
+     * nested-marker check below the ownership-marker check; see
+     * `a nested repo survives a re-download of the outer repo after a cache miss`.
      */
     @Test
     fun `an outer repo id is refused when the inner repo was committed first`() {
@@ -304,6 +304,87 @@ class RepoDownloaderTest {
             File(committed, "config.json").readText(),
         )
         assertTrue(result.isFailure)
+    }
+
+    /**
+     * The destructive order docs/known-limitations.md named: commit "owner", commit "owner/model"
+     * underneath it — nothing objects, a parent marker naming "owner" says nothing about what gets
+     * nested inside it afterwards — then re-download "owner" after a cache miss. into/owner's
+     * marker still reads "owner" and matches, so the unguarded commit step's deleteRecursively()
+     * took into/owner/model with it and returned Result.success: a fully verified repo destroyed
+     * with no failure signal. The nested-marker check must refuse this before the delete runs.
+     */
+    @Test
+    fun `a nested repo survives a re-download of the outer repo after a cache miss`() {
+        val outerFirst = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(configBody))
+        runBlocking { downloaderFor(outerFirst).download("owner", temp.root) }.getOrThrow()
+
+        val inner = listOf(remote("weights.bin", weightsBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(weightsBody))
+        val committedInner =
+            runBlocking { downloaderFor(inner).download("owner/model", temp.root) }.getOrThrow()
+
+        // A different manifest for the same "owner" id, so the cache check at the top of
+        // download() misses and this call reaches the commit step instead of returning the
+        // already-satisfied directory untouched.
+        val otherBody = configBody + "-different"
+        val outerSecond = listOf(remote("config.json", otherBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(otherBody))
+        val result = runBlocking { downloaderFor(outerSecond).download("owner", temp.root) }
+
+        assertTrue("a directory containing a nested repo must not be replaced", result.isFailure)
+        assertEquals(
+            "the nested repo must survive its outer repo being re-downloaded",
+            weightsBody,
+            File(committedInner, "weights.bin").readText(),
+        )
+    }
+
+    /**
+     * Documented, not fixed, in docs/known-limitations.md: a manifest that declares a file literally
+     * named ".ferry" inside a subdirectory makes that repo unreplaceable afterwards. The nested-
+     * marker check above cannot tell this file apart from a real nested repo's marker —
+     * distinguishing them is exactly the kind of cleverness this codebase does not attempt — so once
+     * such a repo commits, any later replace attempt hits the same refusal a real nested repo would.
+     *
+     * This test pins that consequence in place rather than testing for a bug: if a future change
+     * makes such a repo silently replaceable again, this goes red and the doc entry is caught
+     * quietly going out of date instead of just being trusted.
+     */
+    @Test
+    fun `a manifest-declared file literally named ferry in a subdirectory is a documented limitation`() {
+        val notAMarker = "not a marker, just a downloaded file"
+        val first = listOf(
+            remote("config.json", configBody.length.toLong()),
+            remote("sub/.ferry", notAMarker.length.toLong()),
+        )
+        server.enqueue(MockResponse().setBody(configBody))
+        server.enqueue(MockResponse().setBody(notAMarker))
+        val committed = runBlocking { downloaderFor(first).download("owner", temp.root) }.getOrThrow()
+
+        // A different manifest for the same id, so the cache check at the top of download() misses
+        // and this call reaches the commit step instead of returning the already-satisfied
+        // directory untouched.
+        val otherBody = configBody + "-different"
+        val second = listOf(
+            remote("config.json", otherBody.length.toLong()),
+            remote("sub/.ferry", notAMarker.length.toLong()),
+        )
+        server.enqueue(MockResponse().setBody(otherBody))
+        server.enqueue(MockResponse().setBody(notAMarker))
+        val result = runBlocking { downloaderFor(second).download("owner", temp.root) }
+
+        assertTrue(
+            "a file named .ferry in a subdirectory makes the repo unreplaceable — documented, " +
+                "not a bug",
+            result.isFailure,
+        )
+        assertEquals(
+            "the original commit must survive the refused replace",
+            configBody,
+            File(committed, "config.json").readText(),
+        )
     }
 
     /**

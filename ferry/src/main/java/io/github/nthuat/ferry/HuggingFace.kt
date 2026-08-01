@@ -111,9 +111,14 @@ class HuggingFace(
      * never iterates, never downloads and never checks. Accepting both the quoted and the unquoted
      * rel, and reading repeated header fields at the call site, is what keeps that unreachable
      * against a hub that changes its header formatting.
+     *
+     * NEXT_REL is matched only against the text after the URI-Reference's closing `>`, not the
+     * whole segment. `;` is a legal character inside a URL's own path or query — `<.../x;rel=next>;
+     * rel="prev"` — so anchoring the regex to "right after a `;`" is not enough on its own: the
+     * URL's own text has to be out of scope before the anchor ever sees it.
      */
     private fun nextLink(header: String): String? = header.split(',')
-        .firstOrNull { NEXT_REL.containsMatchIn(it) }
+        .firstOrNull { NEXT_REL.containsMatchIn(it.substringAfter('>', "")) }
         ?.substringAfter('<', "")
         ?.substringBefore('>', "")
         ?.trim()
@@ -167,8 +172,19 @@ class HuggingFace(
         /**
          * `rel="next"`, or the unquoted `rel=next` that RFC 8288 also permits. The trailing
          * lookahead is what stops this matching `rel=nextpage`.
+         *
+         * Anchored to an actual `;`, not also to the start of the string. `nextLink` already scopes
+         * this to the text after the URI-Reference's closing `>`, and the Link grammar (RFC 8288)
+         * requires every parameter in that text — including the first — to be preceded by a real
+         * `;`; there is no production for one sitting directly against the `>` with nothing between
+         * them. Accepting the start of the string as an alternative anchor used to be harmless: it
+         * was tested against the *whole* segment, where the URL always came first, so the start of
+         * the string was never where a real `rel` attribute could begin. Once the URL was scoped
+         * out, that same alternative started meaning "right after `>`, no separator" — a position
+         * the grammar never permits — and a segment missing that separator, `<url>rel=next;
+         * rel="prev">`, has no valid parameter there at all, but matched anyway.
          */
-        val NEXT_REL = Regex("""rel="?next"?(?![\w-])""")
+        val NEXT_REL = Regex(""";\s*rel="?next"?(?![\w-])""")
 
         /**
          * ignoreUnknownKeys is load-bearing, not hygiene. HuggingFace adds fields to this response

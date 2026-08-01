@@ -62,6 +62,24 @@ val architectureDictatingDependencies = listOf(
     "io.insert-koin",
 )
 
+/**
+ * OkHttpClient and CoroutineDispatcher must stay on the api configuration: they are in the
+ * signatures of Ferry.huggingFace, HuggingFace and ResumableDownloader, and on implementation a
+ * consumer could not pass its own client or dispatcher at all — the whole point of taking them as
+ * constructor parameters. See EmbeddabilityTest.
+ */
+val okhttpApiDependency = "com.squareup.okhttp3:okhttp"
+
+/**
+ * CoroutineDispatcher itself lives in kotlinx-coroutines-core; -android is today's choice of
+ * artifact, not the requirement. A future switch to declaring core directly is legitimate and must
+ * not false-fail this check, so either satisfies it.
+ */
+val coroutineDispatcherApiDependencies = listOf(
+    "org.jetbrains.kotlinx:kotlinx-coroutines-android",
+    "org.jetbrains.kotlinx:kotlinx-coroutines-core",
+)
+
 tasks.register("checkEmbeddable") {
     group = "verification"
     description = "Fails if Ferry gained a dependency that dictates how a host app is built."
@@ -76,9 +94,34 @@ tasks.register("checkEmbeddable") {
             .filter { dependency -> architectureDictatingDependencies.any { dependency.startsWith(it) } }
             .distinct()
 
-        require(offenders.isEmpty()) {
+        // EmbeddabilityTest cannot catch a regression that moves these back to implementation: it
+        // compiles against this module's source, where both configurations put OkHttpClient and
+        // CoroutineDispatcher on the compile classpath the same way, so it would pass either way.
+        // Proving it for real needs a consumer project built against the published artifact, and
+        // nothing is published yet — this checks the one thing that is cheap to check from inside
+        // the module: that the declared configuration is still api, not just that the types resolve.
+        val apiDependencyIds = configurations.getByName("api").allDependencies
+            .map { "${it.group}:${it.name}" }
+        val missingFromApi = listOfNotNull(
+            okhttpApiDependency.takeIf { it !in apiDependencyIds },
+            coroutineDispatcherApiDependencies.joinToString(" or ")
+                .takeIf { coroutineDispatcherApiDependencies.none { dep -> dep in apiDependencyIds } },
+        )
+
+        // Both checks are computed above before either can fail here, so an architecture-dictating
+        // dependency and an api regression are both reported together — neither's require() aborts
+        // the task before the other's problem is even computed, which would otherwise hide one
+        // behind the other until the first was cleared on its own.
+        val problems = listOfNotNull(
             "Ferry must not depend on these — they dictate the host's architecture: $offenders"
-        }
+                .takeIf { offenders.isNotEmpty() },
+            ("These must be declared with api(...), not implementation(...): $missingFromApi — " +
+                "OkHttpClient and CoroutineDispatcher are in Ferry's public constructors, and a " +
+                "consumer can only supply its own if these types are on its compile classpath too.")
+                .takeIf { missingFromApi.isNotEmpty() },
+        )
+
+        require(problems.isEmpty()) { problems.joinToString("\n") }
     }
 }
 

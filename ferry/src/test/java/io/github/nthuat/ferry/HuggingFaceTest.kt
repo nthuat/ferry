@@ -184,6 +184,100 @@ class HuggingFaceTest {
     }
 
     /**
+     * NEXT_REL used to be matched with `containsMatchIn` against the whole Link segment, URL
+     * included — the shape from docs/known-limitations.md is `<https://huggingface.co/api/models/
+     * x/tree/main?rel=next>; rel="prev"` — so a `prev` link whose own URL happens to carry an
+     * ordinary `?rel=next` query parameter was misidentified as the next page.
+     *
+     * Reproduced here on the mock server rather than the literal huggingface.co URL so the guard
+     * under test is the regex anchor and not the separate same-origin check: production bounds the
+     * live version of this bug to an out-of-turn *same-origin* fetch, so the test has to actually be
+     * same-origin to exercise that path. A second page is enqueued so a regression that does chase
+     * the link gets an immediate, deterministic answer instead of this test hanging on an empty
+     * response queue.
+     */
+    @Test
+    fun `a prev link whose url contains rel=next in its own query string is not treated as next`() {
+        server.enqueue(
+            MockResponse()
+                .setBody("""[ { "type": "file", "path": "page1.bin", "size": 10 } ]""")
+                .addHeader("Link", "<${server.url("/page1?rel=next")}>; rel=\"prev\""),
+        )
+        server.enqueue(
+            MockResponse().setBody("""[ { "type": "file", "path": "page2.bin", "size": 20 } ]"""),
+        )
+
+        val manifest = runBlocking { repo.manifest("owner/model") }.getOrThrow()
+
+        assertEquals(
+            "a prev link must never be followed as though it were next",
+            listOf("page1.bin"),
+            manifest.files.map { it.path },
+        )
+        assertEquals("the prev link's own url must never be requested", 1, server.requestCount)
+    }
+
+    /**
+     * `;` is a legal sub-delimiter inside a URL's own path, not only a parameter separator, so
+     * anchoring the match to "right after any `;`" was not enough on its own: `<.../x;rel=next>;
+     * rel="prev"` still has a `;` immediately before the impostor, with no `?` in sight. Excluding
+     * the URI-Reference from the match entirely — matching only what follows its closing `>` — is
+     * what actually closes this, regardless of whether the impostor sits in a query or a bare path.
+     */
+    @Test
+    fun `a prev link with a semicolon before rel=next inside its own url is not treated as next`() {
+        server.enqueue(
+            MockResponse()
+                .setBody("""[ { "type": "file", "path": "page1.bin", "size": 10 } ]""")
+                .addHeader("Link", "<${server.url("/page1;rel=next")}>; rel=\"prev\""),
+        )
+        server.enqueue(
+            MockResponse().setBody("""[ { "type": "file", "path": "page2.bin", "size": 20 } ]"""),
+        )
+
+        val manifest = runBlocking { repo.manifest("owner/model") }.getOrThrow()
+
+        assertEquals(
+            "a prev link must never be followed as though it were next",
+            listOf("page1.bin"),
+            manifest.files.map { it.path },
+        )
+        assertEquals("the prev link's own url must never be requested", 1, server.requestCount)
+    }
+
+    /**
+     * Scoping the match to the text after `>` (the fix above) closed the query-string and
+     * semicolon-in-URL leaks, but left the anchor's `(?:^|;)` alternative alone. Tested against the
+     * whole segment, `^` was practically unreachable — every real segment starts `<url>…`, so only
+     * the `;` branch ever fired. Once the URL was out of scope, `^` started meaning "right after
+     * `>`, with no separator at all" — a position the Link grammar (RFC 8288) never permits, because
+     * every parameter, including the first, is preceded by a real `;`. A segment missing that
+     * separator has no valid parameter there at all, but `^` let it match as though it did: this
+     * segment's real, well-formed attribute is `rel="prev"`, yet the fake `rel=next` sitting directly
+     * against the closing `>` was read as the next page.
+     */
+    @Test
+    fun `a link with no separator before a fake rel=next is not treated as next`() {
+        server.enqueue(
+            MockResponse()
+                .setBody("""[ { "type": "file", "path": "page1.bin", "size": 10 } ]""")
+                .addHeader("Link", "<${server.url("/prev")}>rel=next; rel=\"prev\">"),
+        )
+        server.enqueue(
+            MockResponse().setBody("""[ { "type": "file", "path": "page2.bin", "size": 20 } ]"""),
+        )
+
+        val manifest = runBlocking { repo.manifest("owner/model") }.getOrThrow()
+
+        assertEquals(
+            "a segment whose real attribute is rel=\"prev\" must not be treated as next",
+            listOf("page1.bin"),
+            manifest.files.map { it.path },
+        )
+        assertEquals("no second page may be requested", 1, server.requestCount)
+    }
+
+    /**
      * The next-page URL is chosen by the server — the one request target in this adapter that comes
      * from a response rather than from the caller. Following it as given would let a compromised hub
      * aim the host app's own OkHttpClient at any address it names, an internal one included.

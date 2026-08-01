@@ -50,8 +50,9 @@ class VerificationException(
  * The commit step replaces whatever sits at the target path, and one repo id is free to be a
  * directory prefix of another — "owner" and "owner/model" are both ordinary ids, and both resolve
  * to strict children of the download root, so no containment check can tell them apart. Ferry
- * therefore deletes only what it wrote under this exact id. A directory with no marker, or a
- * marker naming a different id, is refused rather than removed.
+ * therefore deletes only what it wrote under this exact id. A directory with no marker, a marker
+ * naming a different id, or one that contains another marker anywhere beneath it, is refused
+ * rather than removed.
  */
 private const val MARKER_FILE = ".ferry"
 
@@ -208,6 +209,26 @@ class RepoDownloader(
                             "it — remove the directory to retry",
                     )
                 }
+
+                // A marker matching repoId at $target only says Ferry committed *this* directory
+                // under this id — it says nothing about what got committed underneath it since.
+                // "owner" and "owner/model" are both ordinary ids (see MARKER_FILE's doc): download
+                // ("owner/model") writes its own marker at target/model/.ferry without objection,
+                // because into/owner/model does not exist yet when it commits. A later
+                // download("owner") would otherwise sail past the check above — its own marker
+                // still matches — and deleteRecursively() would take the nested repo with it. Any
+                // .ferry strictly below target, at any depth, is refused before the delete rather
+                // than risk that: usually a real nested repo, but not provably so — a manifest can
+                // declare an ordinary file at that same name (docs/known-limitations.md) — so the
+                // message below states only what is actually known, not which case this is.
+                val nested = target.walkTopDown()
+                    .firstOrNull { it.isFile && it.name == MARKER_FILE && it != marker }
+                if (nested != null) {
+                    throw IOException(
+                        "$target contains $nested; refusing to replace it — remove $nested first",
+                    )
+                }
+
                 if (!target.deleteRecursively()) {
                     return@withContext Result.failure(IOException("cannot replace $target"))
                 }
