@@ -204,6 +204,40 @@ class ModelScopeTest {
         )
     }
 
+    /**
+     * The regression this closes: `requireWithinNamespace` used to compare against a literal
+     * `MODELS_NAMESPACE` (`["api", "v1", "models"]`), ignoring whatever path segments `baseUrl`
+     * itself already carried. A self-hosted mirror at `.../hf` — `baseUrl` is a public parameter —
+     * built a perfectly correct `.../hf/api/v1/models/...` request and then had this check reject it
+     * outright, for every legitimate id, every call. No test caught it because none used a
+     * path-carrying `baseUrl`. Fixed by computing the namespace off `base` via `modelsNamespace(base)`
+     * instead of a bare constant.
+     */
+    @Test
+    fun `a legitimate id succeeds against a path-carrying baseUrl`() {
+        val mirror = ModelScope(OkHttpClient(), baseUrl = server.url("/hf").toString().trimEnd('/'))
+        server.enqueue(MockResponse().setBody(listingJson))
+
+        val result = runBlocking { mirror.manifest("owner/model") }
+
+        assertTrue(result.isSuccess)
+        assertEquals(
+            "/hf/api/v1/models/owner/model/repo/files?Revision=master&Recursive=True",
+            server.takeRequest().path,
+        )
+    }
+
+    /** The namespace check must still catch an actual escape when `baseUrl` itself carries a path. */
+    @Test
+    fun `a repo id that traverses out of the models namespace is still refused against a path-carrying baseUrl`() {
+        val mirror = ModelScope(OkHttpClient(), baseUrl = server.url("/hf").toString().trimEnd('/'))
+
+        val result = runBlocking { mirror.manifest("../../etc/passwd") }
+
+        assertTrue(result.isFailure)
+        assertEquals(0, server.requestCount)
+    }
+
     @Test
     fun `a custom revision is used in the listing url in place of the master default`() {
         server.enqueue(MockResponse().setBody(listingJson))

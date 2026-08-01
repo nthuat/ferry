@@ -1,7 +1,9 @@
 # Known limitations
 
-Findings that were identified, understood, and deliberately not fixed. Each names the condition that
-makes it reachable, so the next person can tell whether their change makes it worse.
+Findings that were identified and understood. Most were deliberately not fixed; entries marked
+**Closed** were, and are kept rather than deleted so the reasoning that made them worth writing down
+in the first place — and the reasoning that later closed them — both stay on record. Each names the
+condition that makes it reachable, so the next person can tell whether their change makes it worse.
 
 This exists because the review record that produced it lives in a git-ignored scratch directory that
 gets deleted. A limitation nobody wrote down is a limitation nobody knows they inherited.
@@ -131,14 +133,27 @@ namespace.
 request is never sent and `manifest` returns `Result.failure`.
 
 Applied to `HuggingFace`'s tree-listing URL and both of `ModelScope`'s URLs (listing and download —
-both build `api/v1/models` before `repoId`) against a literal constant prefix (`api/models` /
-`api/v1/models`). **Not meaningfully exposed** on `HuggingFace`'s own download (`resolve/main`) URL via
-`repoId` specifically: there, `repoId` is the *first* thing appended to `baseUrl`, with no fixed
-literal prefix ahead of it for `repoId`'s own `..` to pop — confirmed directly against okhttp 4.12.0,
-a malicious `repoId` alone resolves there to `{baseUrl}/etc/passwd/resolve/main/{path}`, never
-escaping outside a `{repoId}/resolve/main/{path}` shape, because `resolve/main` and the file path are
-pushed by later, independent `addPathSegments` calls that nothing processed earlier can reach back and
-pop. See Half 2 below for what *is* exposed at that same call site.
+both build `api/v1/models` before `repoId`). The prefix is computed off `base` at every one of these
+sites — `base.newBuilder().addPathSegments("api/models" | "api/v1/models").build()`, then continuing
+the *same* builder to add `repoId` and the rest — not a bare literal constant. That distinction is
+itself a fix, not a stylistic choice: `baseUrl` is a public constructor parameter on both adapters
+(and on `Ferry.huggingFace`/`Ferry.modelScope`), a self-hosted mirror is a contemplated configuration
+(see `sameOriginOrNull`'s own doc), and a literal `["api", "models"]` comparison ignores whatever path
+segments `base` itself already carries. A mirror at `https://nexus.corp/repository/huggingface` builds
+a perfectly correct `.../repository/huggingface/api/models/...` request; a literal-constant check
+rejected it anyway, on every call, because `pathSegments.take(2)` was `["repository", "huggingface"]`,
+never `["api", "models"]`. That was caught by review before ever shipping, not found live, precisely
+*because* it repeats the mistake this whole entry exists to name: an implicit, hardcoded claim about
+what's legal (here, "`baseUrl` has no path of its own") that goes stale the moment a real deployment
+doesn't match it. Computing the prefix from `base` removes the claim rather than widening it.
+
+**Not meaningfully exposed** on `HuggingFace`'s own download (`resolve/main`) URL via `repoId`
+specifically: there, `repoId` is the *first* thing appended to `base`, with no fixed literal prefix
+ahead of it for `repoId`'s own `..` to pop — confirmed directly against okhttp 4.12.0, a malicious
+`repoId` alone resolves there to `{baseUrl}/etc/passwd/resolve/main/{path}`, never escaping outside a
+`{repoId}/resolve/main/{path}` shape, because `resolve/main` and the file path are pushed by later,
+independent `addPathSegments` calls that nothing processed earlier can reach back and pop. See Half 2
+below for what *is* exposed at that same call site.
 
 ### Half 2: the hub's own per-file `path`
 
@@ -163,17 +178,36 @@ its per-file path travels through `addQueryParameter`, an opaque, percent-encode
 segment-popping semantics — confirmed empirically that the same malicious `path` round-trips there
 unchanged and `pathSegments` is unaffected.
 
-**Relationship to `RepoDownloader.resolveInside`, checked, not assumed:** `resolveInside(stagingDir,
+**Relationship to `RepoDownloader.resolveInside`: dominance, not coincidence.** `resolveInside(stagingDir,
 remote.path)` already guards the *filesystem* destination built from the same `path`, before
-`downloader.download(url = remote.url, ...)` is called — so today, for this exact attack shape (a
-`path` of leading `..` segments), the network request was already never issued even before this fix,
-confirmed by reverting the new check and rerunning `RepoDownloaderTest`'s end-to-end case: it still
-passed, on `resolveInside` alone. That is incidental, not designed: `resolveInside`'s boundary
-(`stagingDir`, a filesystem path whose depth is `into` plus a fixed few segments) and the URL's
-boundary (`{repoId}/resolve/main`, unrelated to `into` entirely) are checked by two different
-algorithms over two different notions of "prefix," which happen to both be maximally sensitive to a
-leading `..` today. Nothing keeps them agreeing if either shape changes later — this fix makes the URL
-correct on its own terms, independent of whatever the filesystem side does.
+`downloader.download(url = remote.url, ...)` is called — so today, for a `path` of plain leading `..`
+segments, the network request was already never issued even before this fix, confirmed by reverting
+the new check and rerunning `RepoDownloaderTest`'s end-to-end case: it still passed, on `resolveInside`
+alone. `resolveInside`'s boundary is `stagingDir` itself — zero headroom, not a depth budget: a single
+leading `..` already exits it, regardless of how deep `into` is. That is *stricter* than the URL check
+needs to be, and the two measurably disagree, checked directly rather than assumed: for
+`path = "a//../../x.bin"`, `resolveInside` refuses it (`File.canonicalPath` collapses `//` to `/`
+first, so both `..` pop for real and the result lands outside `stagingDir`) while the URL check does
+not (`addPathSegments` treats the empty segment between the two `/`s as pushed and then popped, so
+only one `..` nets out and the built URL still starts with the intended prefix — correctly, since
+nothing there actually escaped). For `path = "../main/x.bin"`, `resolveInside` again refuses it (lands
+in `stagingDir`'s sibling, not itself) while the URL check does not, because `main` is the literal
+final segment of `{repoId}/resolve/main` — popping it and then pushing back a segment that happens to
+be named `main` again reproduces the exact intended prefix, a genuine no-op on the URL side even
+though the same string is a real escape on the filesystem side. `resolveInside` is not a weaker,
+coincidentally-aligned cousin of the URL check here; in both cases checked, it is the stricter of the
+two, because it is checking a different, independently-varying boundary (`repoId`'s own directory
+nesting under `stagingRoot`) that has no fixed literal segment an attacker can round-trip the way
+`main` allows on the URL side, and its own tolerance for any escape at all is zero regardless. Not
+verified as a general property across every possible `path` string — only checked against the two
+shapes above — so "dominates in the cases checked" is the honest claim, not "dominates unconditionally".
+
+None of that makes the URL check redundant. `resolveInside` runs inside `RepoDownloader`, downstream
+of `manifest()` — but `manifest()` is public, and `RemoteFile.url` is a public field. A host that calls
+`HuggingFace.manifest()` directly and hands `RemoteFile.url` to its own downloader — never touching
+`RepoDownloader` at all — never reaches `resolveInside`, and had nothing checking this URL before this
+fix. That reachability, not agreement with a filesystem check it doesn't dominate anyway, is why this
+fix earns its place.
 
 ### The original reasoning, and the residual
 

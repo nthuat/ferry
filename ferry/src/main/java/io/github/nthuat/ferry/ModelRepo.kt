@@ -18,6 +18,12 @@ data class RemoteFile(
      * manifest it already had.
      */
     val url: String,
+    /**
+     * Checked unconditionally against what lands on disk, by both `RepoDownloader.download()` and
+     * `isSatisfiedBy` — including when this is `0`, which is a real assertion that the file is empty,
+     * not a sentinel for "size unknown" (docs/known-limitations.md). A third-party `ModelRepo` that
+     * cannot report a real size for some file has no way to opt out of this check.
+     */
     val sizeBytes: Long,
     val sha256: String?,
 )

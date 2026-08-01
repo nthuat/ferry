@@ -229,6 +229,59 @@ class HuggingFaceTest {
         )
     }
 
+    /**
+     * A single-segment canonical id (`gpt2`) must not be rejected by the namespace check either —
+     * `pathSegments.take(2)` against a 5-segment path (`api/models/gpt2/tree/main`) still lands on
+     * exactly `[api, models]` regardless of how many segments follow, but this is pinned explicitly
+     * rather than left to coincide with `a single-segment canonical repo id produces one path
+     * segment...` below, whose own point is addPathSegments's splitting behaviour, not this check.
+     */
+    @Test
+    fun `a single-segment repo id is not rejected by the namespace check`() {
+        server.enqueue(MockResponse().setBody(treeJson))
+
+        val result = runBlocking { repo.manifest("gpt2") }
+
+        assertTrue(result.isSuccess)
+        assertEquals("/api/models/gpt2/tree/main?recursive=true", server.takeRequest().path)
+    }
+
+    /**
+     * The regression this closes: `requireWithinNamespace` used to compare against a literal
+     * `MODELS_NAMESPACE` (`["api", "models"]`), ignoring whatever path segments `baseUrl` itself
+     * already carried. A self-hosted mirror at `.../hf` — `baseUrl` is a public parameter, and a
+     * mirror is a contemplated configuration (see `sameOriginOrNull`'s own doc) — built a perfectly
+     * correct `.../hf/api/models/...` request and then had this check reject it outright, for every
+     * legitimate id, every call. No test caught it because none used a path-carrying `baseUrl`.
+     *
+     * Fixed by computing the namespace off `base` instead of a bare constant, mirroring the technique
+     * already used for `downloadUrl`'s prefix.
+     */
+    @Test
+    fun `a legitimate id succeeds against a path-carrying baseUrl`() {
+        val mirror = HuggingFace(OkHttpClient(), baseUrl = server.url("/hf").toString().trimEnd('/'))
+        server.enqueue(MockResponse().setBody(treeJson))
+
+        val result = runBlocking { mirror.manifest("Qwen/Qwen2.5-0.5B-Instruct") }
+
+        assertTrue(result.isSuccess)
+        assertEquals(
+            "/hf/api/models/Qwen/Qwen2.5-0.5B-Instruct/tree/main?recursive=true",
+            server.takeRequest().path,
+        )
+    }
+
+    /** The namespace check must still catch an actual escape when `baseUrl` itself carries a path. */
+    @Test
+    fun `a repo id that traverses out of the models namespace is still refused against a path-carrying baseUrl`() {
+        val mirror = HuggingFace(OkHttpClient(), baseUrl = server.url("/hf").toString().trimEnd('/'))
+
+        val result = runBlocking { mirror.manifest("../../etc/passwd") }
+
+        assertTrue(result.isFailure)
+        assertEquals(0, server.requestCount)
+    }
+
     @Test
     fun `each file carries a resolved download url`() {
         server.enqueue(MockResponse().setBody(treeJson))

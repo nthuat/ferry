@@ -55,20 +55,29 @@ class HuggingFace(
             // the authority on valid ids" a non sequitur here. requireWithinNamespace below checks the
             // *built URL* instead, after this call has already decided what it meant to request: it
             // says nothing about which repo ids are legal, only that this request still lands under
-            // MODELS_NAMESPACE, so it can't go stale the way a denylist can. See
+            // this adapter's own models namespace, so it can't go stale the way a denylist can. See
             // docs/known-limitations.md, which now documents this as closed rather than deferred.
+            //
+            // namespace is computed off `base`, not a literal "api/models" constant: baseUrl is a
+            // public parameter (a self-hosted mirror is a contemplated configuration, see
+            // sameOriginOrNull's doc below), and a literal comparison ignores whatever path segments
+            // base itself already carries — a mirror at ".../hf" would build a perfectly correct
+            // ".../hf/api/models/..." request and then have this check reject it, which is the same
+            // staleness mistake as a denylist, aimed at baseUrl instead of repoId. Building namespace
+            // from base first and continuing the same builder from it is what keeps this correct for
+            // any base, not only a bare-origin one.
             //
             // recursive=true is not optional. The tree endpoint lists one level by default, so a
             // repo with unet/, vae/ or onnx/ subtrees would list a fraction of its files, download
             // that fraction, and report a complete model — with totalBytes short by the difference,
             // which also makes the free-space precheck under-reserve.
-            var url = base.newBuilder()
-                .addPathSegments("api/models")
+            val namespace = base.newBuilder().addPathSegments("api/models").build()
+            var url = namespace.newBuilder()
                 .addPathSegments(repoId)
                 .addPathSegments("tree/main")
                 .addQueryParameter("recursive", "true")
                 .build()
-                .also { requireWithinNamespace(it, MODELS_NAMESPACE, "repoId '$repoId'") }
+                .also { requireWithinNamespace(it, namespace.pathSegments, "repoId '$repoId'") }
                 .toString()
             var pages = 0
 
@@ -234,10 +243,11 @@ class HuggingFace(
      * some other path on `baseUrl`'s origin (docs/known-limitations.md). [subject] only shapes the
      * error message.
      *
-     * [prefix] is a literal constant ([MODELS_NAMESPACE]) at the tree-listing call site, and computed
-     * per call from [repoId] at the download-URL site (see [downloadUrl]) — either way, it is known at
-     * build time, before the request is issued, which is what makes this an assertion on the output
-     * rather than a check on the input.
+     * [prefix] is computed off `base` at the tree-listing call site (`base` plus the literal
+     * `"api/models"`, so a path-carrying `baseUrl` — a self-hosted mirror — is included rather than
+     * ignored), and computed per call from [repoId] at the download-URL site (see [downloadUrl]) —
+     * either way, it is known at build time, before the request is issued, which is what makes this
+     * an assertion on the output rather than a check on the input.
      *
      * Checked on the built URL, not on the input's own text: a check on the input would be a denylist,
      * and the hub alone is the authority on which ids or paths are legal — that is still the right
@@ -273,12 +283,6 @@ class HuggingFace(
          * can only be reached by a server that is broken or hostile.
          */
         const val MAX_PAGES = 100
-
-        /**
-         * The path segments every request built from a caller-supplied `repoId` must stay under.
-         * [requireWithinNamespace] is what enforces it.
-         */
-        val MODELS_NAMESPACE = listOf("api", "models")
 
         /**
          * `rel="next"`, or the unquoted `rel=next` that RFC 8288 also permits. The trailing
