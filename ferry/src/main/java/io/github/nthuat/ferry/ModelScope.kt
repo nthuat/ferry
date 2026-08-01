@@ -55,10 +55,18 @@ class ModelScope(
             // on which ids exist: a denylist goes stale the moment the hub widens its own id rules,
             // and fails closed — rejecting a legitimate id the hub would have served. Deferring to
             // the hub cannot go stale that way; the cost is a slower, less specific failure for what
-            // is a programming error, not a user-facing path. The same reasoning covers "../x" (see
-            // docs/known-limitations.md, which affects both adapters): the traversal it enables is
-            // bounded to the hub's own origin, which is what makes deferring acceptable rather than
-            // merely convenient.
+            // is a programming error, not a user-facing path.
+            //
+            // "../x" used to be covered by this same paragraph, and that was wrong: a denylist is a
+            // claim about which repo ids are legal, and ".." isn't an id-legality question — it's
+            // addPathSegments doing exactly what it always does, popping the segment before it. No
+            // denylist reasoning applies to it either way, so deferring to "the hub decides which ids
+            // are valid" was a non sequitur here, not a narrower case of the same argument.
+            // requireWithinNamespace below checks the *built URL* instead, after this call has already
+            // decided what it meant to request: it says nothing about which repo ids are legal, only
+            // that this request still lands under MODELS_NAMESPACE, so it can't go stale the way a
+            // denylist can. See docs/known-limitations.md, which now documents this as closed rather
+            // than deferred.
             val listingUrl = base.newBuilder()
                 .addPathSegments("api/v1/models")
                 .addPathSegments(repoId)
@@ -71,6 +79,7 @@ class ModelScope(
                 // ModelScopeTest rather than left to whoever next touches this line.
                 .addQueryParameter("Recursive", "True")
                 .build()
+                .also { requireWithinNamespace(it, repoId) }
 
             val request = Request.Builder().url(listingUrl).build()
             client.newCall(request).execute().use { response ->
@@ -132,6 +141,10 @@ class ModelScope(
      * path, this hub does not. Built with [HttpUrl.Builder.addQueryParameter], which percent-encodes
      * the value, rather than interpolated into a string: a path containing `&`, `#`, `+` or a space
      * would otherwise corrupt the request or silently resolve to the wrong file.
+     *
+     * `api/v1/models` precedes [repoId] here exactly as it does in [manifest]'s listing URL — unlike
+     * [HuggingFace]'s own `downloadUrl`, where [repoId] is the first thing appended and there is no
+     * fixed prefix to protect — so the same [requireWithinNamespace] check applies to this URL too.
      */
     private fun downloadUrl(base: HttpUrl, repoId: String, path: String): String = base.newBuilder()
         .addPathSegments("api/v1/models")
@@ -140,7 +153,25 @@ class ModelScope(
         .addQueryParameter("Revision", revision)
         .addQueryParameter("FilePath", path)
         .build()
+        .also { requireWithinNamespace(it, repoId) }
         .toString()
+
+    /**
+     * Fails when [url]'s path no longer starts with [MODELS_NAMESPACE] — the structural signature
+     * that a `..` in [repoId] popped this adapter's own `api/v1/models` segments away and retargeted
+     * the request onto some other path on `baseUrl`'s origin (docs/known-limitations.md).
+     *
+     * Checked on the built URL, not on [repoId]'s own text: a check on the input would be a denylist,
+     * and the hub alone is the authority on which ids are legal — that is still the right call for
+     * `?`/`&`/`#` (see the comment on [manifest]) but was the wrong argument to extend to `..`, which
+     * isn't an id-legality question at all. This assertion says nothing about which ids are legal; it
+     * only refuses to send a request that no longer targets the namespace this method meant it for.
+     */
+    private fun requireWithinNamespace(url: HttpUrl, repoId: String) {
+        if (url.pathSegments.take(MODELS_NAMESPACE.size) != MODELS_NAMESPACE) {
+            throw IOException("repoId '$repoId' escaped the models namespace: $url")
+        }
+    }
 
     @Serializable
     private data class ListingResponse(
@@ -164,6 +195,12 @@ class ModelScope(
     )
 
     private companion object {
+        /**
+         * The path segments every request built from a caller-supplied `repoId` must stay under.
+         * [requireWithinNamespace] is what enforces it.
+         */
+        val MODELS_NAMESPACE = listOf("api", "v1", "models")
+
         /**
          * ignoreUnknownKeys is load-bearing, not hygiene, exactly as in [HuggingFace]: this envelope
          * already carries `IsVisual` and `LatestCommitter` that this code has no use for, and a hub

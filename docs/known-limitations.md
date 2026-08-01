@@ -90,39 +90,51 @@ with no error at any layer. A repo of that size would settle the question either
 `files` list confirms a cap, and a complete one across a genuinely large repo would be the first real
 evidence against one.
 
-## A repo id containing `..` can retarget the request to an arbitrary path on the hub's origin
+## Closed: a repo id containing `..` retargeting the request to an arbitrary path
 
-Both `HuggingFace` and `ModelScope` build their listing and download URLs from a caller-supplied
+Was: both `HuggingFace` and `ModelScope` build their listing and download URLs from a caller-supplied
 `repoId` via `HttpUrl.Builder.addPathSegments`, which resolves a `.` or `..` path segment by popping
 the segment before it rather than rejecting it or encoding it as literal text. A `repoId` of
-`"../../etc/passwd"` pops `api/models` or `api/v1/models` off the path entirely, retargeting the
-request to `{baseUrl}/etc/passwd/...` instead of failing or staying inside the models namespace.
-
-**Condition:** a `repoId` containing `..` segments, from any caller of either adapter. This predates
-ModelScope — `HuggingFace` originally built this URL by string interpolation, parsed afterward by
-`HttpUrl`'s own string parser, which collapses `.`/`..` through the same segment-popping logic
-(`Builder.push`, reached via `resolvePath`) that `addPathSegments` also calls. `HuggingFace`'s later
-conversion to build this URL through `addPathSegments` — the same mechanism `ModelScope` already
-used — changes the code path but not the outcome: confirmed directly against okhttp 4.12.0's source
-that both forms resolve `..` identically. It affects all of string-interpolated `HuggingFace`,
-converted `HuggingFace`, and `ModelScope` equally; none of the three introduces or worsens it relative
-to either other.
-
-**Consequence:** bounded to the hub's own origin — this cannot redirect the request to a different
-host, only to a different path on the one the caller already configured as `baseUrl`, so it is not a
-same-origin escalation. It does mean a caller (or a `repoId` sourced from somewhere less trusted than
-the caller itself) can aim a `GET` at any path under that origin, not only ones inside the models
+`"../../etc/passwd"` popped `api/models` (or, partially, `api/v1/models`) off the path, retargeting
+the request to `{baseUrl}/etc/passwd/...` instead of staying inside the models namespace — bounded to
+the hub's own origin, but able to aim a `GET` at any path under it, not only ones inside that
 namespace.
 
-**Not fixed here:** no `repoId`-shape check was added for this, or for `?`/`&`/`#` (see
-`ModelScope.manifest`'s KDoc, and `HuggingFace.manifest`'s own comment, which picked up the same
-reasoning when it made the same conversion). Both fall out of the same reasoning: a client-side shape
-check on repo ids is a denylist, and the hub alone is the authority on which ids are valid — a
-denylist goes stale the moment the hub's own id rules change, and fails closed on a legitimate id
-rather than deferring to the hub that actually knows. `..` is not a separate, narrower case; it is the
-same problem, made acceptable to defer specifically because the traversal it enables is bounded to
-the hub's own origin
-rather than reaching anywhere else.
+**Closed by a structural check on the output, not the input.** Each adapter now asserts, on the built
+`HttpUrl` and before the request is issued, that `pathSegments` still starts with the adapter's own
+literal namespace prefix (`api/models` for `HuggingFace`, `api/v1/models` for `ModelScope`) —
+`HuggingFace.requireWithinNamespace` / `ModelScope.requireWithinNamespace`. If it does not, the
+request is never sent and `manifest` returns `Result.failure`.
+
+Applied at every URL site where a fixed adapter-owned prefix actually precedes `repoId` in the
+builder chain: `HuggingFace`'s tree-listing URL, and both of `ModelScope`'s URLs (listing and
+download — both build `api/v1/models` before `repoId`, so both carry the same exposure and the same
+fix). **Not applied** to `HuggingFace`'s own download (`resolve/main`) URL: there, `repoId` is the
+*first* thing appended to `baseUrl`, with no fixed literal prefix ahead of it for `..` to pop —
+confirmed directly against okhttp 4.12.0, `"../../etc/passwd"` resolves there to
+`{baseUrl}/etc/passwd/resolve/main/{path}`, never escaping outside a `{repoId}/resolve/main/{path}`
+shape, because `resolve/main` and the file path are pushed by later, independent
+`addPathSegments` calls that nothing processed earlier can reach back and pop. There is no prefix
+there to assert; see the KDoc on `HuggingFace`'s private `downloadUrl` for the full argument.
+
+**The original reasoning for not fixing this conflated two different kinds of check.** The `?`/`&`/`#`
+half of that reasoning still stands, unchanged, in both adapters' KDoc: a client-side shape check on
+`repoId` text is a denylist, and the hub alone is the authority on which ids are valid, so rejecting a
+character up front goes stale the moment the hub widens its own rules. That argument is sound for
+`?`/`&`/`#` — there genuinely is no way to check them except by inspecting `repoId`'s own text — and it
+was wrong to extend to `..`, because `..` was never an input-shape question. `HttpUrl.Builder` doesn't
+reject a request over `..`; it silently *resolves* it, popping real segments the way it always does.
+The fix available for that isn't a better denylist, it's a check on what the builder produced: does
+the URL this code built still point at the namespace this code meant it to. That says nothing about
+which `repoId`s are legal — it cannot go stale as the hub's id rules evolve, because it was never a
+claim about `repoId` at all.
+
+**Residual:** a `repoId` containing `..` that resolves to a *legitimate*-looking path still inside the
+namespace (vanishingly unlikely in practice, and would need to reconstruct a real two-or-more-segment
+id via cancellation) is not distinguished from an ordinary id — this check only catches an escape from
+the namespace, not a same-namespace collision. Not treated as a gap worth closing: it is exactly as
+reachable, and exactly as consequential, as a caller directly passing that reconstructed id in the
+first place.
 
 ## Free space is probed at the nearest existing ancestor, not the directory asked about
 

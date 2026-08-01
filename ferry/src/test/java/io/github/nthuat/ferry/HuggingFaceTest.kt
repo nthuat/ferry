@@ -194,6 +194,41 @@ class HuggingFaceTest {
         )
     }
 
+    /**
+     * The fix for docs/known-limitations.md's "a repo id containing `..` can retarget the request":
+     * addPathSegments resolves ".." by popping the segment before it, so `"../../etc/passwd"` pops
+     * `api/models` off the built listing URL entirely (two ".." against that two-segment prefix),
+     * landing the request at `/etc/passwd/tree/main` instead of failing. requireWithinNamespace
+     * checks the built URL's path rather than repoId's text and must refuse this before the request
+     * is ever sent — asserted on `server.requestCount`, not only on the `Result`, since a destructive
+     * version of this bug could still return a `Result.failure` after already leaking the request.
+     */
+    @Test
+    fun `a repo id that traverses out of the models namespace is refused before any request is issued`() {
+        val result = runBlocking { repo.manifest("../../etc/passwd") }
+
+        assertTrue("must fail rather than retarget the request", result.isFailure)
+        assertEquals(
+            "must not spend the user's data on a request aimed outside the models namespace",
+            0,
+            server.requestCount,
+        )
+    }
+
+    /** The namespace check must refuse only a repo id that actually escapes, not an ordinary one. */
+    @Test
+    fun `an ordinary two-segment repo id is not rejected by the namespace check`() {
+        server.enqueue(MockResponse().setBody(treeJson))
+
+        val result = runBlocking { repo.manifest("Qwen/Qwen2.5-0.5B-Instruct") }
+
+        assertTrue(result.isSuccess)
+        assertEquals(
+            "/api/models/Qwen/Qwen2.5-0.5B-Instruct/tree/main?recursive=true",
+            server.takeRequest().path,
+        )
+    }
+
     @Test
     fun `each file carries a resolved download url`() {
         server.enqueue(MockResponse().setBody(treeJson))

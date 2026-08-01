@@ -168,6 +168,42 @@ class ModelScopeTest {
         )
     }
 
+    /**
+     * The fix for docs/known-limitations.md's "a repo id containing `..` can retarget the request":
+     * addPathSegments resolves ".." by popping the segment before it, so `"../../etc/passwd"` pops
+     * two of `api/v1/models`'s three segments off the built listing URL (leaving only `api`), landing
+     * the request at `/api/etc/passwd/repo/files` instead of failing — still not `api/v1/models`, so
+     * requireWithinNamespace catches it just as it would a full pop. Must be refused before the
+     * request is ever sent — asserted on `server.requestCount`, not only on the `Result`, since a
+     * destructive version of this bug could still return a `Result.failure` after already leaking the
+     * request.
+     */
+    @Test
+    fun `a repo id that traverses out of the models namespace is refused before any request is issued`() {
+        val result = runBlocking { repo.manifest("../../etc/passwd") }
+
+        assertTrue("must fail rather than retarget the request", result.isFailure)
+        assertEquals(
+            "must not spend the user's data on a request aimed outside the models namespace",
+            0,
+            server.requestCount,
+        )
+    }
+
+    /** The namespace check must refuse only a repo id that actually escapes, not an ordinary one. */
+    @Test
+    fun `an ordinary two-segment repo id is not rejected by the namespace check`() {
+        server.enqueue(MockResponse().setBody(listingJson))
+
+        val result = runBlocking { repo.manifest("owner/model") }
+
+        assertTrue(result.isSuccess)
+        assertEquals(
+            "/api/v1/models/owner/model/repo/files?Revision=master&Recursive=True",
+            server.takeRequest().path,
+        )
+    }
+
     @Test
     fun `a custom revision is used in the listing url in place of the master default`() {
         server.enqueue(MockResponse().setBody(listingJson))
