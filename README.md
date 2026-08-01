@@ -214,6 +214,20 @@ strongest argument for keeping verification in the shared layer.
 not at all, without a token. Handle it as a listing failure with a distinguishable cause, not as a
 download failure.
 
+## Sample app
+
+`:sample` is a small Compose app that demonstrates what Ferry refuses to do, not its downloads — a
+progress bar can't show a guarantee, only the absence of one is visible. It lists three real
+HuggingFace repos (a 4.7 MB, an 18 MB, and the 5.6 GB `gpt2`) and a sabotage panel with two controls
+built on seams the library already exposes: one pretends the disk is nearly full, via a
+`FreeSpaceProbe` passed into a directly-constructed `RepoDownloader`, so every model's `WontFit` row
+shows real `SpaceReport` numbers; the other flips a byte in a downloaded file on disk, so tapping
+Re-check visibly redownloads it instead of trusting what's there. Neither adds anything to `:ferry`.
+
+```bash
+./gradlew :sample:assembleDebug
+```
+
 ## Building
 
 ```bash

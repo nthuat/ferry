@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "ferry"
 include(":ferry")
+include(":sample")
