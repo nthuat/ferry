@@ -329,6 +329,60 @@ class RepoDownloaderTest {
     }
 
     /**
+     * `File.usableSpace` — the default `FreeSpaceProbe` — returns 0 for a directory that does not
+     * exist, and nothing creates `into` before the space check runs: a first-ever download into a
+     * fresh directory (exactly what a clean install looks like) would otherwise refuse every model,
+     * permanently, regardless of how much space is actually free. `temp.newFolder` is deliberately
+     * not used for `into` itself — it creates the folder, which is exactly the condition this test
+     * must not have.
+     */
+    @Test
+    fun `a download into a directory that does not exist yet still succeeds when space is real`() {
+        val into = File(temp.newFolder("parent"), "fresh-install")
+        val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
+        server.enqueue(MockResponse().setBody(weightsBody))
+        // The real default SpaceCheck() — backed by the real File.usableSpace — not downloaderFor's
+        // fake lambda probe, which ignores its `dir` argument and so cannot observe this bug either way.
+        val fresh = RepoDownloader(repo = fakeRepo(files), downloader = ResumableDownloader(OkHttpClient()))
+
+        val result = runBlocking { fresh.download("a/b", into) }
+
+        assertTrue(result.isSuccess)
+    }
+
+    /**
+     * Proves the fix answers the real question rather than just always succeeding for a directory
+     * that does not exist yet. The probe mirrors `File.usableSpace`'s own shape — 0 for a path that
+     * is not there, a real figure for one that is — except the existing figure is deliberately
+     * starved (1L) rather than relying on the test machine's disk being full. If RepoDownloader
+     * still probed the raw, not-yet-created `into` directly, the report would carry the phantom
+     * `freeBytes = 0`; probing the nearest existing ancestor instead carries the real 1L, proving
+     * the refusal is for the volume's actual state, not for `into` merely not existing yet.
+     */
+    @Test
+    fun `a download into a directory that does not exist yet still refuses for the volume's real state`() {
+        val existingParent = temp.newFolder("parent")
+        val into = File(existingParent, "fresh-install")
+        val files = listOf(remote("model.bin", 10_000L))
+        val starved = RepoDownloader(
+            repo = fakeRepo(files),
+            downloader = ResumableDownloader(OkHttpClient()),
+            spaceCheck = SpaceCheck(probe = { dir -> if (dir.exists()) 1L else 0L }, headroomBytes = 0L),
+        )
+
+        val result = runBlocking { starved.download("a/b", into) }
+
+        assertTrue(result.isFailure)
+        val report = (result.exceptionOrNull() as InsufficientSpaceException).report
+        assertEquals(
+            "must report the real free space of the nearest existing ancestor, not the phantom " +
+                "zero usableSpace reports for a path that does not exist yet",
+            1L,
+            report.freeBytes,
+        )
+    }
+
+    /**
      * "owner" and "owner/model" are both perfectly legitimate repo ids, and both resolve to strict
      * children of `into` — so no containment check catches this one. But into/owner *contains* the
      * committed into/owner/model, and the commit step's deleteRecursively() would take it along.

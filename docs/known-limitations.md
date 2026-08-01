@@ -123,3 +123,25 @@ rather than deferring to the hub that actually knows. `..` is not a separate, na
 same problem, made acceptable to defer specifically because the traversal it enables is bounded to
 the hub's own origin
 rather than reaching anywhere else.
+
+## Free space is probed at the nearest existing ancestor, not the eventual download directory
+
+`RepoDownloader.download()` may run its space check before `into` (or any of its parents) exists —
+a first-ever download into a fresh directory is the ordinary case, not an edge case. `File.usableSpace`,
+the default `FreeSpaceProbe`, reports 0 for a path that is not there yet, and nothing creates `into`
+before the check runs, so probing it directly would refuse every download on a clean install
+regardless of real free space. The fix walks up to the nearest ancestor that already exists and
+probes that instead, on the premise that free space is a property of the volume, not of one
+directory on it.
+
+**Condition:** the nearest existing ancestor of `into` sits on a different filesystem or mount point
+than the one `into` would actually be created on — for instance, a symlink partway up the chain
+pointing at a separate device. Not reachable from Android app-private storage, which is a single
+volume; would need a caller to pass a directory tree that isn't.
+
+**Consequence:** the space report reflects the ancestor's volume, not necessarily the one `into`
+would land on — it could read sufficient when the real target volume is not, or the reverse.
+
+**Not fixed here:** the JVM has no portable, dependency-free way to name "the filesystem a
+not-yet-created path would be created on" short of creating it first, which is the side effect this
+approach exists to avoid.

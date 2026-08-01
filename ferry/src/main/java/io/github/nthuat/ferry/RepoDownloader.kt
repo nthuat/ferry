@@ -142,8 +142,19 @@ class RepoDownloader(
             // cache-hit check above it: a probe is caller-supplied and free to throw, and that
             // failure must become Result.failure like every other I/O in this method, not escape
             // the public boundary.
+            //
+            // Probed at nearestExistingAncestor(into), not into itself: nothing creates `into`
+            // before this line runs (mkdirs first appears below, at :stagingDir.mkdirs()), and
+            // File.usableSpace — the default probe — reports 0 for a path that does not exist. A
+            // first-ever download into a fresh directory is the ordinary case, not an edge case, so
+            // without this every model would refuse forever on a clean install regardless of real
+            // free space. This is a second deliberate broadening, same shape as the cache-hit
+            // reorder above: a call that used to fail on the phantom zero now succeeds when the
+            // volume genuinely has room. It does not touch the guarantee that matters — a volume
+            // genuinely short on space still refuses, because the ancestor probed sits on the same
+            // filesystem `into` would be created on.
             onProgress(RepoProgress.CheckingSpace(repoId))
-            val report = spaceCheck.check(manifest, into)
+            val report = spaceCheck.check(manifest, nearestExistingAncestor(into))
             if (!report.sufficient) {
                 return@withContext Result.failure(InsufficientSpaceException(report))
             }
@@ -301,4 +312,20 @@ class RepoDownloader(
         }
         return candidate
     }
+
+    /**
+     * The nearest ancestor of [dir] that already exists on disk — [dir] itself, if it already does.
+     *
+     * Free space is a property of the volume a path sits on, not of one specific directory on it,
+     * so probing the nearest real ancestor answers the same question probing [dir] itself would,
+     * without needing [dir] to exist first — an mkdirs() here purely to ask a question would leave
+     * an empty directory behind on every refusal, which this avoids entirely by never writing.
+     * Imperfect only across a mount-point boundary between the ancestor and wherever [dir] would
+     * actually be created — not a concern for a single-volume app-private directory tree, which is
+     * the only place this library runs (see docs/known-limitations.md). Falls back to [dir] itself
+     * if nothing above it exists either, so this is never worse than probing [dir] directly would
+     * have been.
+     */
+    private fun nearestExistingAncestor(dir: File): File =
+        generateSequence(dir) { it.parentFile }.firstOrNull { it.exists() } ?: dir
 }
