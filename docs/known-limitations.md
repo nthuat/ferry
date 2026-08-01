@@ -124,23 +124,28 @@ same problem, made acceptable to defer specifically because the traversal it ena
 the hub's own origin
 rather than reaching anywhere else.
 
-## Free space is probed at the nearest existing ancestor, not the eventual download directory
+## Free space is probed at the nearest existing ancestor, not the directory asked about
 
-`RepoDownloader.download()` may run its space check before `into` (or any of its parents) exists —
-a first-ever download into a fresh directory is the ordinary case, not an edge case. `File.usableSpace`,
-the default `FreeSpaceProbe`, reports 0 for a path that is not there yet, and nothing creates `into`
-before the check runs, so probing it directly would refuse every download on a clean install
-regardless of real free space. The fix walks up to the nearest ancestor that already exists and
-probes that instead, on the premise that free space is a property of the volume, not of one
-directory on it.
+`DefaultFreeSpaceProbe` (`SpaceCheck`'s default `FreeSpaceProbe`) may be asked about a directory
+that does not exist yet — `RepoDownloader.download()`'s `into` before a first-ever download, or any
+directory a host passes to a direct, preflighting `SpaceCheck().check(...)` call, since `SpaceCheck`
+is public and exported on the `api` configuration. A first-ever download into a fresh directory is
+the ordinary case, not an edge case. `File.usableSpace` reports 0 for a path that is not there yet,
+so probing it directly would report "nothing fits" regardless of real free space. The fix walks up
+to the nearest ancestor that already exists and probes that instead, on the premise that free space
+is a property of the volume, not of one directory on it. Fixed in the probe itself, not in
+`RepoDownloader`, so every caller of the default probe is covered, not only one route to it.
 
-**Condition:** the nearest existing ancestor of `into` sits on a different filesystem or mount point
-than the one `into` would actually be created on — for instance, a symlink partway up the chain
-pointing at a separate device. Not reachable from Android app-private storage, which is a single
-volume; would need a caller to pass a directory tree that isn't.
+**Condition:** the nearest existing ancestor of the directory asked about sits on a different
+filesystem or mount point than the one that directory would actually be created on — for instance, a
+symlink partway up the chain pointing at a separate device. Not reachable from Android app-private
+storage, which is a single volume; would need a caller to pass a directory tree that isn't.
 
-**Consequence:** the space report reflects the ancestor's volume, not necessarily the one `into`
-would land on — it could read sufficient when the real target volume is not, or the reverse.
+**Consequence:** the space report reflects the ancestor's volume, not necessarily the one the
+directory asked about would land on — it could read sufficient when the real target volume is not,
+or the reverse. A caller supplying its own `FreeSpaceProbe` does not get this walk at all — a custom
+probe is that caller's own contract, and `RepoDownloader` passes it whatever directory it was given,
+unwalked.
 
 **Not fixed here:** the JVM has no portable, dependency-free way to name "the filesystem a
 not-yet-created path would be created on" short of creating it first, which is the side effect this

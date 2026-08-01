@@ -365,34 +365,24 @@ class RepoDownloaderTest {
 
     /**
      * Proves the fix answers the real question rather than just always succeeding for a directory
-     * that does not exist yet. The probe mirrors `File.usableSpace`'s own shape — 0 for a path that
-     * is not there, a real figure for one that is — except the existing figure is deliberately
-     * starved (1L) rather than relying on the test machine's disk being full. If RepoDownloader
-     * still probed the raw, not-yet-created `into` directly, the report would carry the phantom
-     * `freeBytes = 0`; probing the nearest existing ancestor instead carries the real 1L, proving
-     * the refusal is for the volume's actual state, not for `into` merely not existing yet.
+     * that does not exist yet — using the real default probe end to end, not a custom one: the walk
+     * now lives in `DefaultFreeSpaceProbe` itself (see its doc in `SpaceCheck.kt`), and a custom
+     * probe deliberately does not get it, so a custom probe can no longer be used here to distinguish
+     * "refused because genuinely starved" from "refused because `into` merely does not exist yet" —
+     * that distinction is what `SpaceCheckTest`'s own new case proves directly against the probe.
+     * This test instead proves the guarantee survives end to end: a requirement no real disk could
+     * ever satisfy still refuses, deterministically, on any machine.
      */
     @Test
-    fun `a download into a directory that does not exist yet still refuses for the volume's real state`() {
-        val existingParent = temp.newFolder("parent")
-        val into = File(existingParent, "fresh-install")
-        val files = listOf(remote("model.bin", 10_000L))
-        val starved = RepoDownloader(
-            repo = fakeRepo(files),
-            downloader = ResumableDownloader(OkHttpClient()),
-            spaceCheck = SpaceCheck(probe = { dir -> if (dir.exists()) 1L else 0L }, headroomBytes = 0L),
-        )
+    fun `a download into a directory that does not exist yet still refuses when the repo cannot possibly fit`() {
+        val into = File(temp.newFolder("parent"), "fresh-install")
+        val files = listOf(remote("model.bin", Long.MAX_VALUE / 2))
+        val impossible = RepoDownloader(repo = fakeRepo(files), downloader = ResumableDownloader(OkHttpClient()))
 
-        val result = runBlocking { starved.download("a/b", into) }
+        val result = runBlocking { impossible.download("a/b", into) }
 
         assertTrue(result.isFailure)
-        val report = (result.exceptionOrNull() as InsufficientSpaceException).report
-        assertEquals(
-            "must report the real free space of the nearest existing ancestor, not the phantom " +
-                "zero usableSpace reports for a path that does not exist yet",
-            1L,
-            report.freeBytes,
-        )
+        assertTrue(result.exceptionOrNull() is InsufficientSpaceException)
     }
 
     /**

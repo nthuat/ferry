@@ -85,4 +85,26 @@ class SpaceCheckTest {
 
         assertEquals(temp.root, asked)
     }
+
+    /**
+     * `File.usableSpace` returns 0 — not an exception — for a path that does not exist, and
+     * `SpaceCheck` is public, exported on the `api` configuration: a host preflighting with
+     * `SpaceCheck().check(manifest, File(filesDir, "models"))` on a clean install, before that
+     * directory is ever created, would otherwise see "nothing fits" regardless of how much space is
+     * actually free. `temp.newFolder` is used only for the parent, never for the directory under
+     * test itself — that call creates the folder, which is exactly the condition this test must not
+     * have; a `TemporaryFolder`-backed suite is why 100 pre-existing tests never saw this bug.
+     */
+    @Test
+    fun `the default probe reports the volume's real free space for a directory that does not exist yet`() {
+        val missing = File(temp.newFolder("parent"), "fresh-install")
+
+        val report = SpaceCheck().check(manifestOf(1L), missing)
+
+        assertTrue(
+            "must report the volume's real free space, not the phantom zero usableSpace reports " +
+                "for a path that does not exist yet",
+            report.freeBytes > 0L,
+        )
+    }
 }
