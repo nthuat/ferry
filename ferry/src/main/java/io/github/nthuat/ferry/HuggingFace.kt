@@ -45,19 +45,39 @@ class HuggingFace(
             // alone is the authority on that — a denylist goes stale the moment the hub widens its own
             // id rules, and fails closed, rejecting a legitimate id the hub would have served. A
             // malformed id is a programming error; a generic hub-side rejection is an acceptable
-            // answer for one. See [ModelScope.manifest]'s KDoc, which carries the same reasoning, and
-            // docs/known-limitations.md for the related "..", traversal case this does not change.
+            // answer for one. See [ModelScope.manifest]'s KDoc, which carries the same `?`/`&`/`#`
+            // reasoning.
+            //
+            // ".." used to be argued away by this same paragraph, and that was wrong: a denylist is a
+            // claim about which repo ids are legal, and ".." is not an id-shape question at all — it's
+            // addPathSegments doing exactly what it always does, popping the segment before it. No
+            // denylist reasoning applies to it either way, which is what made deferring to "the hub is
+            // the authority on valid ids" a non sequitur here. requireWithinNamespace below checks the
+            // *built URL* instead, after this call has already decided what it meant to request: it
+            // says nothing about which repo ids are legal, only that this request still lands under
+            // this adapter's own models namespace, so it can't go stale the way a denylist can. See
+            // docs/known-limitations.md, which now documents this as closed rather than deferred.
+            //
+            // namespace is computed off `base`, not a literal "api/models" constant: baseUrl is a
+            // public parameter (a self-hosted mirror is a contemplated configuration, see
+            // sameOriginOrNull's doc below), and a literal comparison ignores whatever path segments
+            // base itself already carries — a mirror at ".../hf" would build a perfectly correct
+            // ".../hf/api/models/..." request and then have this check reject it, which is the same
+            // staleness mistake as a denylist, aimed at baseUrl instead of repoId. Building namespace
+            // from base first and continuing the same builder from it is what keeps this correct for
+            // any base, not only a bare-origin one.
             //
             // recursive=true is not optional. The tree endpoint lists one level by default, so a
             // repo with unet/, vae/ or onnx/ subtrees would list a fraction of its files, download
             // that fraction, and report a complete model — with totalBytes short by the difference,
             // which also makes the free-space precheck under-reserve.
-            var url = base.newBuilder()
-                .addPathSegments("api/models")
+            val namespace = base.newBuilder().addPathSegments("api/models").build()
+            var url = namespace.newBuilder()
                 .addPathSegments(repoId)
                 .addPathSegments("tree/main")
                 .addQueryParameter("recursive", "true")
                 .build()
+                .also { requireWithinNamespace(it, namespace.pathSegments, "repoId '$repoId'") }
                 .toString()
             var pages = 0
 
@@ -184,13 +204,63 @@ class HuggingFace(
      * segment text, and a `&` is left as a literal character that is inert for a different reason — a
      * path segment has no structural meaning for `&` the way a query string does. None of the three
      * can be reinterpreted as a query or fragment delimiter.
+     *
+     * Checked against a **computed**, not literal, prefix — unlike the tree-listing URL above, nothing
+     * adapter-owned precedes [repoId] here, so `"api/models"` is not the right thing to assert (it is
+     * never part of a real resolve URL; `HuggingFaceTest` pins the actual shape, and asserting it here
+     * would reject every legitimate download). The prefix this call actually intends is
+     * `{repoId}/resolve/main` — everything before [path] — which is exactly [intended] below, built
+     * once with [path] left off and reused both to assert against and to extend. [repoId]'s own `..`
+     * cannot violate this: confirmed against okhttp 4.12.0, nothing precedes [repoId] in *this* method
+     * for it to pop, and `resolve`/`main` are pushed by a later, independent `addPathSegments` call
+     * that nothing processed earlier can reach back into — so [intended] always ends in `resolve`,
+     * `main` regardless of [repoId]'s content, and the check on it is a no-op for that vector.
+     *
+     * [path] is a different story: it comes from the hub's own manifest over the network, not from
+     * [repoId], and it is appended *after* [intended] is already fixed — a `path` of
+     * `"../../../../other/repo/resolve/main/secret.bin"` pops `main`, `resolve` and both of [repoId]'s
+     * segments away, retargeting the fetch at a different repo's file on this same origin entirely
+     * (confirmed empirically). `RepoDownloader.resolveInside` guards the *filesystem* destination
+     * built from the same [path], but that is a different boundary, at a depth that varies with
+     * whatever directory the caller passed — nothing previously asserted this URL stays where this
+     * call meant it to, independent of that. [requireWithinNamespace] now does.
      */
-    private fun downloadUrl(base: HttpUrl, repoId: String, path: String): String = base.newBuilder()
-        .addPathSegments(repoId)
-        .addPathSegments("resolve/main")
-        .addPathSegments(path)
-        .build()
-        .toString()
+    private fun downloadUrl(base: HttpUrl, repoId: String, path: String): String {
+        val intended = base.newBuilder()
+            .addPathSegments(repoId)
+            .addPathSegments("resolve/main")
+            .build()
+        val full = intended.newBuilder()
+            .addPathSegments(path)
+            .build()
+        requireWithinNamespace(full, intended.pathSegments, "path '$path' for repoId '$repoId'")
+        return full.toString()
+    }
+
+    /**
+     * Fails when [url]'s path no longer starts with [prefix] — the structural signature that a `..`
+     * somewhere upstream popped segments this call intended to keep and retargeted the request onto
+     * some other path on `baseUrl`'s origin (docs/known-limitations.md). [subject] only shapes the
+     * error message.
+     *
+     * [prefix] is computed off `base` at the tree-listing call site (`base` plus the literal
+     * `"api/models"`, so a path-carrying `baseUrl` — a self-hosted mirror — is included rather than
+     * ignored), and computed per call from [repoId] at the download-URL site (see [downloadUrl]) —
+     * either way, it is known at build time, before the request is issued, which is what makes this
+     * an assertion on the output rather than a check on the input.
+     *
+     * Checked on the built URL, not on the input's own text: a check on the input would be a denylist,
+     * and the hub alone is the authority on which ids or paths are legal — that is still the right
+     * call for `?`/`&`/`#` (see the comment on [manifest]) but was the wrong argument to extend to
+     * `..`, which isn't a legality question at all. This assertion says nothing about which ids or
+     * paths are legal; it only refuses to send a request that no longer targets the namespace this
+     * call meant it for.
+     */
+    private fun requireWithinNamespace(url: HttpUrl, prefix: List<String>, subject: String) {
+        if (url.pathSegments.take(prefix.size) != prefix) {
+            throw IOException("$subject escaped its expected namespace: $url")
+        }
+    }
 
     @Serializable
     private data class TreeEntry(

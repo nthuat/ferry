@@ -194,6 +194,94 @@ class HuggingFaceTest {
         )
     }
 
+    /**
+     * The fix for docs/known-limitations.md's "a repo id containing `..` can retarget the request":
+     * addPathSegments resolves ".." by popping the segment before it, so `"../../etc/passwd"` pops
+     * `api/models` off the built listing URL entirely (two ".." against that two-segment prefix),
+     * landing the request at `/etc/passwd/tree/main` instead of failing. requireWithinNamespace
+     * checks the built URL's path rather than repoId's text and must refuse this before the request
+     * is ever sent — asserted on `server.requestCount`, not only on the `Result`, since a destructive
+     * version of this bug could still return a `Result.failure` after already leaking the request.
+     */
+    @Test
+    fun `a repo id that traverses out of the models namespace is refused before any request is issued`() {
+        val result = runBlocking { repo.manifest("../../etc/passwd") }
+
+        assertTrue("must fail rather than retarget the request", result.isFailure)
+        assertEquals(
+            "must not spend the user's data on a request aimed outside the models namespace",
+            0,
+            server.requestCount,
+        )
+    }
+
+    /** The namespace check must refuse only a repo id that actually escapes, not an ordinary one. */
+    @Test
+    fun `an ordinary two-segment repo id is not rejected by the namespace check`() {
+        server.enqueue(MockResponse().setBody(treeJson))
+
+        val result = runBlocking { repo.manifest("Qwen/Qwen2.5-0.5B-Instruct") }
+
+        assertTrue(result.isSuccess)
+        assertEquals(
+            "/api/models/Qwen/Qwen2.5-0.5B-Instruct/tree/main?recursive=true",
+            server.takeRequest().path,
+        )
+    }
+
+    /**
+     * A single-segment canonical id (`gpt2`) must not be rejected by the namespace check either —
+     * `pathSegments.take(2)` against a 5-segment path (`api/models/gpt2/tree/main`) still lands on
+     * exactly `[api, models]` regardless of how many segments follow, but this is pinned explicitly
+     * rather than left to coincide with `a single-segment canonical repo id produces one path
+     * segment...` below, whose own point is addPathSegments's splitting behaviour, not this check.
+     */
+    @Test
+    fun `a single-segment repo id is not rejected by the namespace check`() {
+        server.enqueue(MockResponse().setBody(treeJson))
+
+        val result = runBlocking { repo.manifest("gpt2") }
+
+        assertTrue(result.isSuccess)
+        assertEquals("/api/models/gpt2/tree/main?recursive=true", server.takeRequest().path)
+    }
+
+    /**
+     * The regression this closes: `requireWithinNamespace` used to compare against a literal
+     * `MODELS_NAMESPACE` (`["api", "models"]`), ignoring whatever path segments `baseUrl` itself
+     * already carried. A self-hosted mirror at `.../hf` — `baseUrl` is a public parameter, and a
+     * mirror is a contemplated configuration (see `sameOriginOrNull`'s own doc) — built a perfectly
+     * correct `.../hf/api/models/...` request and then had this check reject it outright, for every
+     * legitimate id, every call. No test caught it because none used a path-carrying `baseUrl`.
+     *
+     * Fixed by computing the namespace off `base` instead of a bare constant, mirroring the technique
+     * already used for `downloadUrl`'s prefix.
+     */
+    @Test
+    fun `a legitimate id succeeds against a path-carrying baseUrl`() {
+        val mirror = HuggingFace(OkHttpClient(), baseUrl = server.url("/hf").toString().trimEnd('/'))
+        server.enqueue(MockResponse().setBody(treeJson))
+
+        val result = runBlocking { mirror.manifest("Qwen/Qwen2.5-0.5B-Instruct") }
+
+        assertTrue(result.isSuccess)
+        assertEquals(
+            "/hf/api/models/Qwen/Qwen2.5-0.5B-Instruct/tree/main?recursive=true",
+            server.takeRequest().path,
+        )
+    }
+
+    /** The namespace check must still catch an actual escape when `baseUrl` itself carries a path. */
+    @Test
+    fun `a repo id that traverses out of the models namespace is still refused against a path-carrying baseUrl`() {
+        val mirror = HuggingFace(OkHttpClient(), baseUrl = server.url("/hf").toString().trimEnd('/'))
+
+        val result = runBlocking { mirror.manifest("../../etc/passwd") }
+
+        assertTrue(result.isFailure)
+        assertEquals(0, server.requestCount)
+    }
+
     @Test
     fun `each file carries a resolved download url`() {
         server.enqueue(MockResponse().setBody(treeJson))
@@ -222,6 +310,39 @@ class HuggingFaceTest {
         assertTrue(
             nested.url.endsWith("/Qwen/Qwen2.5-0.5B-Instruct/resolve/main/onnx/model.onnx"),
         )
+    }
+
+    /**
+     * The other half of docs/known-limitations.md's `..` entry, closed alongside the repoId one: a
+     * manifest entry's own `path` comes from the hub's response, not from `repoId`, and is appended
+     * after `resolve/main` in `downloadUrl`. A `path` of
+     * `"../../../../other/repo/resolve/main/secret.bin"` pops `main`, `resolve` and both of
+     * `repoId`'s own segments away, retargeting the download at a different repo's file on this same
+     * origin entirely — confirmed empirically before this fix existed. `requireWithinNamespace` now
+     * catches it at manifest-build time, so the whole call fails before any `RemoteFile` carrying
+     * that URL is ever handed back to a caller.
+     *
+     * Legitimate nesting is proven not to be rejected by the existing, unchanged
+     * `a nested file path produces a download url with the nesting preserved as real path segments`
+     * test just above, which already exercises this same, now-checked code path and still passes.
+     */
+    @Test
+    fun `a manifest file path that traverses out of the resolve namespace fails the whole manifest call`() {
+        val evilPath = "../../../../other/repo/resolve/main/secret.bin"
+        server.enqueue(
+            MockResponse().setBody("""[ { "type": "file", "path": "$evilPath", "size": 5 } ]"""),
+        )
+
+        val result = runBlocking { repo.manifest("owner/model") }
+
+        assertTrue(
+            "must fail rather than hand back a RemoteFile pointing outside the resolve namespace",
+            result.isFailure,
+        )
+        // manifest() never issues a request for a per-file download URL itself - it only computes
+        // the string - so this is 1 (the tree listing) regardless of this fix. Asserted anyway: it
+        // is what "no download request issued" actually means at this layer, and it costs nothing.
+        assertEquals(1, server.requestCount)
     }
 
     /**

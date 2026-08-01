@@ -194,6 +194,64 @@ class RepoDownloaderTest {
         )
     }
 
+    /**
+     * The fix for docs/known-limitations.md's "a file declared with size 0 is verified by nothing":
+     * the post-download check used to skip entirely when remote.sizeBytes was 0, while isSatisfiedBy
+     * (no such guard) always compared onDisk.length() == remote.sizeBytes unconditionally — so the
+     * two disagreed on a hub declaring an explicit zero. Both now apply the same unconditional
+     * equality, so a genuinely empty declared-0 file is verified (trivially, by matching) on the
+     * fresh-download path and stays a stable hit on the cache-check path, rather than the two ever
+     * disagreeing about the same file.
+     */
+    @Test
+    fun `a file declared size 0 that is genuinely empty is a stable cache hit`() {
+        val files = listOf(remote("empty.bin", 0L))
+        server.enqueue(MockResponse().setBody(""))
+
+        val first = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+        val requestsAfterFirst = server.requestCount
+
+        val second = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+
+        assertEquals(0L, File(first, "empty.bin").length())
+        assertEquals(first, second)
+        assertEquals(
+            "a genuinely empty declared-0 file must be a stable cache hit, not re-downloaded",
+            requestsAfterFirst,
+            server.requestCount,
+        )
+    }
+
+    /**
+     * The consequence docs/known-limitations.md named for the asymmetry this fix closes: a hub
+     * declaring size 0 while actually serving a non-empty body used to be accepted at download time
+     * (the guard skipped the check) and then fail isSatisfiedBy forever after (which never had the
+     * guard) — committed once, then silently re-downloaded and re-committed on every subsequent
+     * call, never a hit and never failing loudly either. Dropping the download-time guard instead
+     * fails the very first attempt, cleanly and repeatably, rather than committing something that
+     * can never satisfy its own manifest.
+     */
+    @Test
+    fun `a file declared size 0 with a non-empty body fails cleanly instead of looping forever`() {
+        val files = listOf(remote("empty.bin", 0L))
+        server.enqueue(MockResponse().setBody(weightsBody))
+
+        val first = runBlocking { downloaderFor(files).download("a/b", temp.root) }
+
+        assertTrue(first.isFailure)
+        assertTrue(first.exceptionOrNull() is VerificationException)
+        assertFalse(
+            "a size-0 mismatch must not commit a directory that can never satisfy its own manifest",
+            File(temp.root, "a/b").exists(),
+        )
+
+        server.enqueue(MockResponse().setBody(weightsBody))
+        val second = runBlocking { downloaderFor(files).download("a/b", temp.root) }
+
+        assertTrue("must fail the same way every time, not loop into some other state", second.isFailure)
+        assertTrue(second.exceptionOrNull() is VerificationException)
+    }
+
     @Test
     fun `files without a published hash are accepted`() {
         val files = listOf(remote("config.json", configBody.length.toLong()))
@@ -570,6 +628,48 @@ class RepoDownloaderTest {
 
         assertTrue(result.isFailure)
         assertFalse("must not write outside the staging directory", escaped.exists())
+    }
+
+    /**
+     * End-to-end version of `HuggingFaceTest`'s equivalent, wired through the real adapter rather
+     * than `fakeRepo`. Proves the whole pipeline fails at `repo.manifest(repoId)`, the very first
+     * line of `download()`, so the escaped URL is never fetched and no second request happens —
+     * asserted on `server.requestCount`, not only on the `Result`.
+     *
+     * Revert-checked and found **not to isolate `HuggingFace`'s new namespace check specifically**:
+     * with that check disabled, this test still passes, because `resolveInside(stagingDir,
+     * remote.path)` below independently refuses the same `path` on the filesystem side first —
+     * for this exact leading-`..` shape, both checks trip at the first `..` token, so either alone
+     * is currently sufficient. The isolating proof that `HuggingFace.manifest()`'s own check does
+     * its job independently of `RepoDownloader` is
+     * `HuggingFaceTest`'s `a manifest file path that traverses out of the resolve namespace fails
+     * the whole manifest call`, which calls `manifest()` directly with no `resolveInside` in the
+     * picture at all. Kept here anyway as an end-to-end regression pin: the two checks guard
+     * different layers (network request vs. filesystem write) that happen to agree today only
+     * because of how deep `stagingDir` and the URL's own prefix each are — not because either was
+     * designed to cover the other, so nothing keeps that agreement from drifting apart later.
+     */
+    @Test
+    fun `a hub-supplied file path that traverses out of HuggingFace's resolve namespace is refused before any download request`() {
+        val hf = HuggingFace(OkHttpClient(), baseUrl = server.url("/").toString().trimEnd('/'))
+        val evilPath = "../../../../other/repo/resolve/main/secret.bin"
+        server.enqueue(
+            MockResponse().setBody("""[ { "type": "file", "path": "$evilPath", "size": 5 } ]"""),
+        )
+        val downloader = RepoDownloader(
+            repo = hf,
+            downloader = ResumableDownloader(OkHttpClient()),
+            spaceCheck = SpaceCheck(probe = { Long.MAX_VALUE }, headroomBytes = 0L),
+        )
+
+        val result = runBlocking { downloader.download("owner/model", temp.root) }
+
+        assertTrue(result.isFailure)
+        assertEquals(
+            "only the tree listing may be requested, never the escaped file",
+            1,
+            server.requestCount,
+        )
     }
 
     /** The escape check must reject only real escapes, not ordinary subdirectories within a repo. */
