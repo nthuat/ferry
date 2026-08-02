@@ -1192,4 +1192,106 @@ class RepoDownloaderTest {
     fun `abandoning a repo with no staging succeeds`() {
         assertTrue(runBlocking { downloaderFor(emptyList()).abandon("never/started", temp.root) }.isSuccess)
     }
+
+    @Test
+    fun `stagedBytes is zero when nothing has ever been staged`() {
+        assertEquals(0L, downloaderFor(emptyList()).stagedBytes("a/b", temp.root))
+    }
+
+    /** A `.part` with a validator is exactly what `ResumableDownloader` resumes from — see its own KDoc. */
+    @Test
+    fun `stagedBytes credits a part file that has a validator`() {
+        File(temp.root, ".staging/a/b/model.bin.part").apply {
+            parentFile?.mkdirs()
+            writeText("12345678") // 8 bytes
+        }
+        File(temp.root, ".staging/a/b/model.bin.validator").writeText("\"v1\"")
+
+        assertEquals(8L, downloaderFor(emptyList()).stagedBytes("a/b", temp.root))
+    }
+
+    /**
+     * No validator, no resume: `ResumableDownloader` refuses to resume blind and restarts this file
+     * from byte zero (its own KDoc). Counting these bytes would overstate what the next attempt
+     * actually reuses — exactly the dishonesty `stagedBytes`' own KDoc says it must not commit.
+     */
+    @Test
+    fun `stagedBytes does not credit a part file with no validator`() {
+        File(temp.root, ".staging/a/b/model.bin.part").apply {
+            parentFile?.mkdirs()
+            writeText("12345678")
+        }
+
+        assertEquals(0L, downloaderFor(emptyList()).stagedBytes("a/b", temp.root))
+    }
+
+    /**
+     * The shape `ResumableDownloader` leaves once the *server's* declared length is satisfied, before
+     * anything is compared to the manifest — the strongest kind of progress, but not re-verified here
+     * (see `stagedBytes`' own doc on why it disagrees with `RepoDownloader`'s own credit check).
+     */
+    @Test
+    fun `stagedBytes counts a bare staged file under its final name`() {
+        File(temp.root, ".staging/a/b/config.json").apply {
+            parentFile?.mkdirs()
+            writeText(configBody)
+        }
+
+        assertEquals(configBody.length.toLong(), downloaderFor(emptyList()).stagedBytes("a/b", temp.root))
+    }
+
+    @Test
+    fun `stagedBytes sums every staged file's reusable bytes together, touching no network`() {
+        File(temp.root, ".staging/a/b/config.json").apply {
+            parentFile?.mkdirs()
+            writeText(configBody) // bare, complete-looking: counted in full
+        }
+        File(temp.root, ".staging/a/b/model.bin.part").apply {
+            writeText("12345678") // 8 resumable bytes, credited
+        }
+        File(temp.root, ".staging/a/b/model.bin.validator").writeText("\"v1\"")
+        File(temp.root, ".staging/a/b/other.bin.part").writeText("not credited, no validator")
+
+        val expected = configBody.length.toLong() + 8L
+        assertEquals(expected, downloaderFor(emptyList()).stagedBytes("a/b", temp.root))
+        assertEquals("must not touch the network", 0, server.requestCount)
+    }
+
+    /**
+     * The marker `download()` writes into staging just before the commit rename (`MARKER_FILE`) is
+     * Ferry's own bookkeeping, not a manifest file's bytes, and must not inflate the count.
+     */
+    @Test
+    fun `stagedBytes ignores the ownership marker written just before commit`() {
+        File(temp.root, ".staging/a/b/config.json").apply {
+            parentFile?.mkdirs()
+            writeText(configBody)
+        }
+        File(temp.root, ".staging/a/b/.ferry").writeText("a/b")
+
+        assertEquals(configBody.length.toLong(), downloaderFor(emptyList()).stagedBytes("a/b", temp.root))
+    }
+
+    /** Total, not `Result`-returning: an escaping repo id is zero bytes of progress, not a thrown exception. */
+    @Test
+    fun `stagedBytes is zero rather than throwing for an escaping repo id`() {
+        assertEquals(0L, downloaderFor(emptyList()).stagedBytes("../..", temp.root))
+    }
+
+    /**
+     * Ties `stagedBytes` back to the scenario that opened this whole plan: the bytes a failed
+     * download leaves behind (Task 1's own test) are exactly what this method exists to surface.
+     */
+    @Test
+    fun `stagedBytes reflects the bytes a failed download actually left behind`() {
+        val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
+        // A body shorter than declared fails the size check after writing what it sent.
+        server.enqueue(MockResponse().setBody(weightsBody.take(5)))
+        val downloader = downloaderFor(files)
+
+        val result = runBlocking { downloader.download("a/b", temp.root) }
+
+        assertTrue(result.isFailure)
+        assertEquals(5L, downloader.stagedBytes("a/b", temp.root))
+    }
 }

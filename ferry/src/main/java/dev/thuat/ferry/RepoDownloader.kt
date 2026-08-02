@@ -430,6 +430,66 @@ class RepoDownloader(
     }
 
     /**
+     * Bytes already staged for [repoId] under [into] that a resumed [download] could reuse instead of
+     * re-fetching — the number behind a "Resume, N already downloaded" row.
+     *
+     * **Cheap, on purpose.** This may be called once per row to render a whole list, so unlike
+     * [download]'s own credit check ([remainingBytes], via [isSatisfiedIn]) it never hashes a byte and
+     * never touches the network — it only sums file lengths already on disk. That is exactly why the
+     * two can disagree: [remainingBytes] re-hashes a bare staged file before trusting it, because an
+     * under-reserved space check risks filling the disk; this one cannot afford to and settles for an
+     * estimate. Treat the result as what it is — a hint for what to show, not a promise of what
+     * [download] will actually transfer next. The hub is free to invalidate a `.part`'s validator the
+     * moment the next attempt asks, and a `.part` with no validator restarts from zero regardless of
+     * what this number said.
+     *
+     * **Total, not `Result`-returning.** An absent, unreadable, or otherwise unusable staging
+     * directory is zero bytes of progress, not an error: there is nothing for a caller to react to
+     * beyond "no progress to resume", so a `Result` would only make every call site unwrap a failure
+     * that never carries more than 0 already does. A small result type was considered in place of a
+     * plain [Long] and dropped for the same reason: there is no second fact to carry alongside the
+     * count — no partial flag, no error — so a wrapper would be ceremony around one number.
+     *
+     * **What counts as reusable, without hashing:**
+     * - A `<file>.part` with a sibling `<file>.validator` counts at the `.part`'s own length — the
+     *   bytes [ResumableDownloader] resumes from when a validator is present.
+     * - A `<file>.part` with **no** validator counts as zero: [ResumableDownloader] refuses to resume
+     *   blind (its own KDoc) and restarts that file from byte zero, so those bytes are not reusable.
+     * - A bare file staged under its final name — the shape left once the *server's* declared length
+     *   is satisfied, before anything is compared to the manifest — counts at its full length. It is
+     *   the strongest kind of progress a resume can find (a real hit skips the file entirely), but is
+     *   *not* re-verified here, so a stale or corrupt one still counts; [download] itself would still
+     *   catch and re-fetch it, just not for free the way this number implies.
+     * - `.validator` files contribute nothing on their own; they are metadata about a `.part`, not
+     *   payload, and the marker [download] writes into staging just before committing
+     *   (`target/[MARKER_FILE]`, still sitting in staging in the narrow window before the rename)
+     *   contributes nothing either, for the same reason.
+     */
+    fun stagedBytes(repoId: String, into: File): Long = try {
+        val stagingDir = resolveInside(File(into, ".staging"), repoId)
+        val marker = File(stagingDir, MARKER_FILE)
+        if (!stagingDir.isDirectory) {
+            0L
+        } else {
+            stagingDir.walkTopDown()
+                .filter { it.isFile && it != marker }
+                .sumOf { staged ->
+                    when {
+                        staged.name.endsWith(".validator") -> 0L
+                        staged.name.endsWith(".part") -> {
+                            val validator =
+                                File(staged.parentFile, "${staged.name.removeSuffix(".part")}.validator")
+                            if (validator.isFile) staged.length() else 0L
+                        }
+                        else -> staged.length()
+                    }
+                }
+        }
+    } catch (e: IOException) {
+        0L
+    }
+
+    /**
      * Whether [dir] already holds every file of this manifest, at the right size, with the right
      * hash where one was published.
      *
