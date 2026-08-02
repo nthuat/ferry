@@ -290,3 +290,36 @@ unwalked.
 **Not fixed here:** the JVM has no portable, dependency-free way to name "the filesystem a
 not-yet-created path would be created on" short of creating it first, which is the side effect this
 approach exists to avoid.
+
+## Ollama repo ids outside `library/` are unverified
+
+`Ollama.manifest` builds `/v2/{namespace}/{name}/manifests/{tag}` for any `repoId`, defaulting the
+namespace to `library` only when `repoId` carries none of its own — see `Ollama`'s own KDoc for the
+full mapping. Every fact this adapter is built against was verified live against `library/`-namespaced
+models only (`llava`, `qwen2.5`, `nomic-embed-text`, `llama3.2-vision`); a user-published model under
+its own namespace was never fetched live.
+
+**Condition:** a `repoId` of the form `namespace/name[:tag]` where `namespace` is not `library`.
+
+**Consequence, if the assumption is wrong:** unknown — the URL shape follows the same Docker-reference
+convention Ollama documents for `ollama pull namespace/name`, so this is expected to work unchanged,
+but "expected" is not "observed," which is the bar every other fact in this file was held to.
+
+## A registry response shaped like a manifest list parses as an empty manifest, not a refusal
+
+`Ollama.manifest` requests `application/vnd.docker.distribution.manifest.v2+json` specifically to get
+back a single image manifest (`layers: [...]`) rather than a manifest list / OCI image index
+(`manifests: [...]`, for multi-architecture images) — never observed live against `registry.ollama.ai`
+today, but not something the `Accept` header can force a compliant-but-different server, or a proxy in
+between, to honour. `ManifestResponse.layers` defaults to an empty list the same way `ModelScope`'s
+`Data.Files` does, so a response shaped like a manifest list parses without error and yields zero
+files — `Result.success` with an empty `RepoManifest`, not `Result.failure`.
+
+**Condition:** something between this adapter and `registry.ollama.ai` answers with a manifest list
+despite the `Accept` header — an API version change, or a proxy that does not forward it.
+
+**Consequence:** `Ollama.manifest` alone returns a "successful" empty manifest. `RepoDownloader.download`
+already refuses this one layer up ("no files listed for $repoId" — see its own comment), so the one
+path this library ships is not exposed; a caller that calls `Ollama.manifest` directly — the way
+`SpaceCheck` is also called directly by a preflighting host — would see an empty manifest rather than a
+distinguishable error.
