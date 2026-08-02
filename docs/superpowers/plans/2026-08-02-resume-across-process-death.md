@@ -391,6 +391,65 @@ Expected: PASS. Every existing space test must still pass — in particular the 
 
 ---
 
+### Task 4b: Skip a staged file that is already complete and correct
+
+**Files:**
+- Modify: `ferry/src/main/java/dev/thuat/ferry/RepoDownloader.kt`
+- Test: `ferry/src/test/java/dev/thuat/ferry/RepoDownloaderTest.kt`
+
+**Added during execution.** Task 4 surfaced it: crediting a completed staged file toward the space
+check while the download loop still re-fetches it is incoherent, and it is the half of resume that
+actually matters.
+
+**Background:**
+
+The loop calls `downloader.download(url, destination)` for every file in the manifest,
+unconditionally (`RepoDownloader.kt:229`). `ResumableDownloader` decides where to start from
+`part.exists()` alone (`:53`) and never consults the final file — and worse, at `:84` it *deletes* an
+existing final file before writing.
+
+So a repo of ten files where nine completed and verified re-downloads all ten. The nine finished
+files are destroyed and re-fetched. `.part` continuation rescues only the single file that was
+mid-transfer, which is the least valuable part of the progress.
+
+**Fix:** before calling `download` for a file, skip it when the staged copy already satisfies the
+manifest — declared size, and hash where one is published. That is the per-file predicate
+`isSatisfiedBy` applies and Task 4 already reused; use the same one, do not write a third.
+
+Emit progress for a skipped file so a caller can distinguish "already had it" from "fetched it"
+rather than seeing an unexplained jump. Decide which `RepoProgress` shape says that honestly — if
+none does, say so rather than misusing one.
+
+**Do not** touch `ResumableDownloader`. Its `target.delete()` is correct for the case it handles:
+it owns the final rename, and a stale target there would otherwise survive a fresh download. The
+skip belongs one layer up, where the manifest is known.
+
+- [ ] **Step 1: Write the failing test**
+
+A repo of two files. Stage one completed and correct, plus its marker of correctness. Enqueue a
+response for the *other* file only. Assert the download succeeds and `server.requestCount` is 1 —
+the completed file was not re-fetched. Assert on the request count, not only on success: the whole
+claim is about bytes not moving.
+
+- [ ] **Step 2: Run it and watch it fail**
+
+Expected: FAIL — MockWebServer has no queued response for the second request, so the run errors or
+hangs rather than merely mismatching a count.
+
+- [ ] **Step 3: Implement the skip**
+
+- [ ] **Step 4: Run**
+
+- [ ] **Step 5: Prove it cannot skip something it should not**
+
+A staged file whose bytes do **not** match the manifest must still be fetched. Revert the predicate
+to a bare `exists()` check, confirm that test goes red, restore. Skipping on existence alone would
+commit a corrupt file, which is guarantee 2.
+
+- [ ] **Step 6: Commit**
+
+---
+
 ### Task 5: Let a caller see there is progress to resume
 
 **Files:**
