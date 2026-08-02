@@ -994,4 +994,62 @@ class RepoDownloaderTest {
             File(dir, "gone.bin").exists(),
         )
     }
+
+    @Test
+    fun `abandon removes only this repo's staging`() {
+        val mine = File(temp.root, ".staging/a/b/model.bin.part").apply {
+            parentFile?.mkdirs()
+            writeText("mine")
+        }
+        val other = File(temp.root, ".staging/c/d/model.bin.part").apply {
+            parentFile?.mkdirs()
+            writeText("other")
+        }
+
+        val result = runBlocking { downloaderFor(emptyList()).abandon("a/b", temp.root) }
+
+        assertTrue(result.isSuccess)
+        assertFalse(mine.exists())
+        assertTrue("another repo's staging is not this call's business", other.exists())
+    }
+
+    /**
+     * The property the KDoc calls out by name: abandoning an in-progress download says nothing
+     * about a previously committed copy of the same repo id, which may be complete, verified, and in
+     * use by the host right now. `abandon` must never resolve against `into` itself, only against
+     * `into/.staging`.
+     */
+    @Test
+    fun `abandon does not touch an already committed repo`() {
+        val committed = File(temp.root, "a/b/model.bin").apply {
+            parentFile?.mkdirs()
+            writeText("committed bytes")
+        }
+        File(temp.root, "a/b/.ferry").writeText("a/b")
+
+        runBlocking { downloaderFor(emptyList()).abandon("a/b", temp.root) }
+
+        assertTrue("abandoning a download says nothing about a completed one", committed.exists())
+        assertEquals("committed bytes", committed.readText())
+    }
+
+    /**
+     * repoId is caller-supplied, same as in [download]; `abandon` must refuse the same escapes
+     * rather than trust its own, separate reasoning about what's safe.
+     */
+    @Test
+    fun `abandon cannot escape into`() {
+        val outside = File(temp.root, "outside.txt").apply { writeText("not yours") }
+
+        val result = runBlocking { downloaderFor(emptyList()).abandon("../..", temp.root) }
+
+        assertTrue(result.isFailure)
+        assertTrue(outside.exists())
+    }
+
+    /** The caller asked for a state — no staging for this repo id — that already holds. */
+    @Test
+    fun `abandoning a repo with no staging succeeds`() {
+        assertTrue(runBlocking { downloaderFor(emptyList()).abandon("never/started", temp.root) }.isSuccess)
+    }
 }

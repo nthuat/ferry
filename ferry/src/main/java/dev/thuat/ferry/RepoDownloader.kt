@@ -357,6 +357,40 @@ class RepoDownloader(
     }
 
     /**
+     * Reclaims the staging bytes of a [download] for [repoId] under [into] that the caller has given
+     * up on — a failed attempt that will not be retried, or one abandoned mid-flight. Task 1 stopped
+     * deleting staging on failure so a retry can resume from it; this is what reclaims the bytes when
+     * no retry is coming.
+     *
+     * Deletes only `into/.staging/[repoId]`, resolved through the same [resolveInside] guard
+     * [download] uses to compute its own `stagingDir` — mirrored here rather than re-argued, so a
+     * hostile or malformed [repoId] cannot escape the staging area any more than it can escape
+     * `download`'s. Touches nothing else: never [into] itself, never the staging root `into/.staging`
+     * itself, and never a committed target.
+     *
+     * In particular — the property most worth stating plainly — **this method never resolves
+     * against, looks at, or touches `into/[repoId]`.** Abandoning an in-progress download says
+     * nothing about a previously committed copy of the same repo id, which may be complete, verified,
+     * and in use by the host right now. A method named `abandon` that deleted that would be the worst
+     * API in this library.
+     *
+     * No staging present for [repoId] is success, not failure: the caller asked for a state — this
+     * repo's staging reclaimed — and that state already holds.
+     */
+    suspend fun abandon(repoId: String, into: File): Result<Unit> = withContext(dispatcher) {
+        try {
+            val stagingRoot = File(into, ".staging")
+            val stagingDir = resolveInside(stagingRoot, repoId)
+            if (stagingDir.exists() && !stagingDir.deleteRecursively()) {
+                return@withContext Result.failure(IOException("cannot delete staging for $repoId"))
+            }
+            Result.success(Unit)
+        } catch (e: IOException) {
+            Result.failure(e)
+        }
+    }
+
+    /**
      * Whether [dir] already holds every file of this manifest, at the right size, with the right
      * hash where one was published.
      *
