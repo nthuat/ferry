@@ -898,4 +898,100 @@ class RepoDownloaderTest {
         assertTrue("the partial file is the resume point and must survive", staged.isFile)
         assertEquals(5, staged.length())
     }
+
+    /**
+     * Durable staging (Task 1) means a `.part` can outlive the manifest that produced it: the hub
+     * removed the file, or renamed it. Left alone it is never completed or committed, and a
+     * long-lived repo accretes it forever.
+     *
+     * Asserted at the *committed* path, not the staging one: on success `stagingDir` is renamed
+     * wholesale onto `target` (`RepoDownloader.download`'s own commit step), so checking the old
+     * `.staging/...` path proves nothing — it is always empty afterwards purely because the whole
+     * directory moved, whether or not the orphan was pruned. An unpruned orphan does not merely
+     * survive in staging forever; it rides that rename straight into the committed, "verified"
+     * repo, which is the failure this assertion actually has to catch.
+     */
+    @Test
+    fun `a staged file the manifest no longer lists is discarded`() {
+        File(temp.root, ".staging/a/b/gone.bin.part").apply {
+            parentFile?.mkdirs()
+            writeText("stale bytes from a manifest that no longer lists this file")
+        }
+        val files = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(configBody))
+
+        val dir = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+
+        assertFalse(
+            "an orphan must not accrete forever, and must never ride the commit rename into the repo",
+            File(dir, "gone.bin.part").exists(),
+        )
+    }
+
+    /**
+     * The counterpart to the orphan test above: pruning must not be so eager it deletes progress
+     * still worth keeping. A validator is staged alongside the `.part` — mirroring
+     * `ResumableDownloaderTest`'s own resume fixtures — because `ResumableDownloader` refuses to
+     * resume without one (see its own KDoc). Without the validator this attempt would restart from
+     * byte zero and could still land on the right final bytes, proving nothing about pruning at all;
+     * the Range header assertion below is what makes this a proof of resume rather than a coincidence
+     * of a passing restart.
+     *
+     * This may already pass before pruning is implemented — pruning only has to *not delete* this
+     * file, and resuming itself is `ResumableDownloader`'s pre-existing behaviour, exercised through
+     * `RepoDownloader` for the first time here. Kept as a regression pin either way: the thing worth
+     * protecting is pruning never becoming so aggressive it takes a live `.part` with it.
+     */
+    @Test
+    fun `a staged file the manifest still lists survives to be resumed`() {
+        val partial = File(temp.root, ".staging/a/b/config.json.part").apply {
+            parentFile?.mkdirs()
+            writeText(configBody.take(4))
+        }
+        File(temp.root, ".staging/a/b/config.json.validator").writeText("\"v1\"")
+        val files = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(
+            MockResponse().setResponseCode(206).setBody(configBody.drop(4))
+                .addHeader("Content-Range", "bytes 4-${configBody.length - 1}/${configBody.length}"),
+        )
+
+        val dir = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+
+        assertEquals(configBody, File(dir, "config.json").readText())
+        assertFalse(partial.exists())
+        val request = server.takeRequest()
+        assertEquals(
+            "must actually have asked for a range, not restarted from zero",
+            "bytes=4-",
+            request.getHeader("Range"),
+        )
+    }
+
+    /**
+     * The shape the plan's own correction names: `ResumableDownloader` renames `.part` onto the
+     * final name as soon as the *server's* declared length is satisfied, before `RepoDownloader`
+     * ever compares anything to the manifest — so an orphan can sit under its final name, not only
+     * as `.part`. A naive `endsWith(".part")` filter would miss exactly this file.
+     *
+     * Asserted at the committed path for the same reason as the `.part` orphan test above: the
+     * staging path is trivially empty after a successful commit regardless of pruning, because the
+     * whole directory is renamed away. An unpruned bare-name orphan would otherwise land inside the
+     * committed repo directory, indistinguishable from a real file to anything reading it back.
+     */
+    @Test
+    fun `a staged file under its final name that the manifest no longer lists is discarded too`() {
+        File(temp.root, ".staging/a/b/gone.bin").apply {
+            parentFile?.mkdirs()
+            writeText("a file the server considered complete, but the manifest no longer lists")
+        }
+        val files = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(configBody))
+
+        val dir = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+
+        assertFalse(
+            "a completed-looking orphan must not accrete forever, or end up inside the committed repo",
+            File(dir, "gone.bin").exists(),
+        )
+    }
 }

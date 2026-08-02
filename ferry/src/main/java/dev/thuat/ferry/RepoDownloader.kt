@@ -209,6 +209,11 @@ class RepoDownloader(
 
             stagingDir.mkdirs()
 
+            // Durable staging (kept since Task 1) can carry scratch from a manifest this attempt no
+            // longer agrees with. Pruned before the loop below touches anything, so a stale file
+            // never has a chance to be mistaken for progress worth resuming.
+            pruneOrphans(stagingDir, manifest)
+
             manifest.files.forEachIndexed { index, remote ->
                 // remote.path comes from the hub's manifest over the network — untrusted the same
                 // way repoId is. Without this, a hostile listing could write anywhere on disk.
@@ -371,6 +376,55 @@ class RepoDownloader(
         onDisk.isFile &&
             onDisk.length() == remote.sizeBytes &&
             (remote.sha256 == null || Sha256.matches(onDisk, remote.sha256))
+    }
+
+    /**
+     * Deletes every staged file under [stagingDir] that [manifest] no longer vouches for.
+     *
+     * Durable staging (kept since Task 1) means a file here can outlive the manifest that produced
+     * it — the hub removed it, renamed it, or the caller is retrying against a different revision —
+     * and three different things can be sitting at a stale path, not only one: `<path>.part`
+     * (interrupted mid-transfer), `<path>.validator` (the ETag that makes resuming that `.part`
+     * safe), and `<path>` itself, bare, under its final name. That third shape is not an edge case:
+     * `ResumableDownloader` renames a `.part` onto the final name as soon as the *server's own*
+     * declared length is satisfied, before this method has compared anything to the manifest, so a
+     * short body with a self-consistent length produces exactly it. All three are orphans on equal
+     * footing once their path drops out of the manifest — none will ever be completed or committed,
+     * and left alone a long-lived repo would accrete them forever.
+     *
+     * Walks staging rather than the manifest, because an orphan is exactly the file the manifest
+     * cannot name. Every path the walk finds is re-resolved through [resolveInside] rather than
+     * deleted directly — staging content is not attacker-controlled today, but a walk over a
+     * directory is exactly where a symlink would matter, and resolving through the same helper every
+     * other path in this file trusts means this one does not need its own argument for why what it
+     * found is safe to delete.
+     *
+     * A path still named in the manifest survives here untouched, even if the bytes staged under it
+     * are no longer the size or hash the manifest currently declares. That is deliberate, not an
+     * oversight: recording what a file's size or hash was declared as on a previous attempt, so this
+     * could be caught before transferring anything, would need its own bookkeeping that outlives the
+     * scratch it describes, and would need to be invalidated correctly across manifest changes,
+     * retried revisions, and interrupted writes — a second staleness problem in service of avoiding
+     * the first. It is not needed for correctness: [download]'s existing per-file verification
+     * already resolves this case on its own, because a stale `.part` completes against a length or
+     * hash the manifest no longer agrees with, fails verification, and is never committed. The only
+     * cost of leaving it alone is a wasted transfer of bytes that turn out to be unusable — correct,
+     * not free, and judged not worth a second piece of state to avoid.
+     */
+    private fun pruneOrphans(stagingDir: File, manifest: RepoManifest) {
+        if (!stagingDir.isDirectory) return
+        val declaredPaths = manifest.files.mapTo(HashSet()) { it.path }
+        stagingDir.walkTopDown()
+            .filter { it.isFile }
+            .forEach { staged ->
+                val relativePath = staged.relativeTo(stagingDir).invariantSeparatorsPath
+                val vouchedFor = relativePath in declaredPaths ||
+                    relativePath.removeSuffix(".part") in declaredPaths ||
+                    relativePath.removeSuffix(".validator") in declaredPaths
+                if (!vouchedFor) {
+                    resolveInside(stagingDir, relativePath).delete()
+                }
+            }
     }
 
     /**
