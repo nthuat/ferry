@@ -37,6 +37,33 @@ So durable staging **cannot** be mistaken for a committed repo, and a committed 
 
 Per-file staleness is already handled and tested: `ResumableDownloader` stores the ETag as a validator, replays it with `If-Range`, and **refuses to resume at all when the server publishes no validator** — a design decision already made because resuming blind risks a corrupt file that is exactly the right size.
 
+### What staging actually contains — corrected during Task 1
+
+This plan was drafted assuming staging holds `.part` files. It holds three kinds of thing, because
+`ResumableDownloader` renames `<file>.part` to `<file>` as soon as **the server's own declared
+length** is satisfied — before `RepoDownloader` has compared anything to the manifest:
+
+| On disk | Meaning |
+|---|---|
+| `<file>.part` | interrupted mid-transfer |
+| `<file>.validator` | the ETag that makes resuming that `.part` safe |
+| `<file>` | the *server* considered it complete. The manifest may still reject it. |
+
+The third case is not an edge case — a short body with a self-consistent `Content-Length` produces
+exactly it, and that is the shape Task 1's own test exercises.
+
+It is also the best news in this plan: a file that downloaded **and verified** is already sitting in
+staging under its final name, so resuming should skip it entirely rather than continue it. That is
+stronger than `.part` continuation.
+
+**The rule every later task must follow:** a staged file under its final name counts as progress only
+if it matches the manifest's declared size and, where a `sha256` is published, its hash. That
+predicate already exists — it is what `isSatisfiedBy` applies per file. A completed-looking file that
+fails verification must never be counted, or resume will skip a corrupt file forever.
+
+Tasks 2, 4 and 5 were written before this was understood and each say "`.part`" where they mean "all
+three". Read them with this table in hand.
+
 ---
 
 ### Task 1: Stop deleting staging on failure
