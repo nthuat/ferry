@@ -104,6 +104,20 @@ already-committed repo.
 
 Documented on `download`'s KDoc. Serialising is the caller's responsibility.
 
+**Narrowed for one caller: `:ferry-work`'s `enqueueRepoDownload`.** `:ferry` itself has no enqueue
+step to serialise at — a plain method call has nothing to deduplicate against. `:ferry-work`, the
+optional WorkManager module, does: `enqueueRepoDownload` wraps `WorkManager.enqueueUniqueWork` with
+`ExistingWorkPolicy.KEEP`, keyed by repo id, so two enqueues for the same id while one is already
+running or queued collapse into one `RepoDownloadWorker` — the second is dropped, not run.
+
+This closes the case *within WorkManager only*, not the general one this entry names. A host that
+calls `RepoDownloader.download` directly — bypassing `enqueueRepoDownload`, whether or not
+`:ferry-work` is even on its classpath — is exactly as exposed as before, and so is a host that
+mixes both call paths for the same repo id (one direct call, one enqueued through `:ferry-work`):
+`enqueueUniqueWork`'s bookkeeping only sees work enqueued through it, so it cannot detect, let alone
+serialise against, a call it was never part of. Serialising remains the caller's responsibility for
+every path other than "always go through `enqueueRepoDownload` for this repo id."
+
 ## A refused directory needs manual removal
 
 When a target exists without a matching marker, Ferry refuses rather than deleting it — the whole
