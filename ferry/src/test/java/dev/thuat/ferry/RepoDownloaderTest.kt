@@ -876,4 +876,26 @@ class RepoDownloaderTest {
 
         assertTrue(runBlocking { downloaderFor(files).download("a/b", temp.root) }.isFailure)
     }
+
+    /**
+     * The bytes already fetched are the whole point of resuming. Before this change the finally
+     * block deleted them, so a second attempt re-downloaded a multi-gigabyte model from zero.
+     */
+    @Test
+    fun `a failed download leaves its partial bytes in staging`() {
+        val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
+        // A body shorter than declared fails the size check after writing what it sent.
+        server.enqueue(MockResponse().setBody(weightsBody.take(5)))
+
+        val result = runBlocking { downloaderFor(files).download("a/b", temp.root) }
+
+        assertTrue(result.isFailure)
+        // Not "model.bin.part": ResumableDownloader compares what it wrote against this response's
+        // own Content-Length (5, matching what MockWebServer actually sent), agrees they match, and
+        // renames part onto the final in-staging name before returning success. It is the outer,
+        // stricter check against the manifest's declared size (13) that then fails.
+        val staged = File(temp.root, ".staging/a/b/model.bin")
+        assertTrue("the partial file is the resume point and must survive", staged.isFile)
+        assertEquals(5, staged.length())
+    }
 }

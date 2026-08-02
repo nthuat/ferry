@@ -134,7 +134,6 @@ class RepoDownloader(
             return@withContext Result.failure(IOException("no files listed for $repoId"))
         }
 
-        var staging: File? = null
         try {
             // repoId is used as a relative path rather than flattened into one directory name, so
             // two distinct ids (e.g. "a/b" and "a--b") can never collide onto the same directory.
@@ -144,9 +143,15 @@ class RepoDownloader(
             // repo, so a repoId like "../<other-repo>" resolves to that other repo's own directory
             // and would still pass a check against `into`. Shrinking the boundary to the one
             // directory a repoId's staging copy is actually allowed to land in closes that.
+            //
+            // Staging is durable scratch, not a transaction log: a failed attempt leaves it exactly
+            // as far as it got, on disk, deliberately, so the next attempt can resume from those
+            // bytes instead of re-fetching them. Success consumes it — stagingDir.renameTo(target)
+            // below moves it out from under this path entirely, so there is nothing left afterward
+            // to clean up. A failure is not cleaned up here; Task 3 adds the explicit abandon() that
+            // reclaims a staging directory the caller has given up on.
             val stagingRoot = File(into, ".staging")
             val stagingDir = resolveInside(stagingRoot, repoId)
-            staging = stagingDir
             val target = resolveInside(into, repoId)
 
             // Which ids are committed *nested inside* repoId — see MARKER_ROOT's doc for the shape
@@ -343,17 +348,6 @@ class RepoDownloader(
             Result.success(target)
         } catch (e: IOException) {
             Result.failure(e)
-        } finally {
-            // Staging survives only as long as the attempt. ResumableDownloader keeps its own
-            // .part files inside it, so removing it here forfeits resume; that is the trade for
-            // never leaving a half-repo on disk, and is revisited when resume-across-launch lands.
-            //
-            // Captured in the outer `staging` var rather than recomputed here: a second, independent
-            // resolveInside call in finally is exactly what let a too-loose boundary check silently
-            // agree with itself and delete an unrelated, already-committed repo. Reusing the one
-            // validated value means there is only one computation to get right, and if it was never
-            // assigned — repoId was rejected before staging was known — there is nothing to clean up.
-            staging?.deleteRecursively()
         }
     }
 
