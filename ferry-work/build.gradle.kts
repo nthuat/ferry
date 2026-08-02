@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "io.github.nthuat.ferry.work"
+    namespace = "dev.thuat.ferry.work"
     compileSdk = 35
 
     defaultConfig {

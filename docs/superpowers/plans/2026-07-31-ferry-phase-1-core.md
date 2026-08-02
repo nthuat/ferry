@@ -26,7 +26,7 @@ requirement of this phase, and do not remove the `finally` to satisfy it.
   cannot fail is worse than no assertion, because it reports safety it never checked.
 - **Never edit a test to match a failing implementation** unless the test's own setup is wrong —
   and if it is, say so out loud rather than quietly adjusting it.
-- Package for all new code: `io.github.nthuat.ferry`
+- Package for all new code: `dev.thuat.ferry`
 - Kotlin `2.0.21`, JVM target `17`, `minSdk 26`, `compileSdk 35`, AGP `8.7.3`
 - `allWarningsAsErrors.set(true)` is already on in `ferry/build.gradle.kts`. Unused imports, unused parameters, and deprecation warnings **fail the build**. Do not add an import you do not use.
 - **No Android APIs in any file in this plan.** Not `StatFs`, not `Context`, not `Log`. Every class here must be constructible and testable from a plain JVM unit test. `java.io.File.usableSpace` gives free space on Android and on the JVM, which is why `StatFs` is not needed.
@@ -110,7 +110,7 @@ Three things that are easy to get wrong:
 Create `ferry/src/test/java/io/github/nthuat/ferry/HuggingFaceTest.kt`:
 
 ```kotlin
-package io.github.nthuat.ferry
+package dev.thuat.ferry
 
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
@@ -254,7 +254,7 @@ Expected: FAIL at compilation — `Unresolved reference 'HuggingFace'`.
 Create `ferry/src/main/java/io/github/nthuat/ferry/ModelRepo.kt`:
 
 ```kotlin
-package io.github.nthuat.ferry
+package dev.thuat.ferry
 
 /**
  * One downloadable file in a model repository.
@@ -301,7 +301,7 @@ interface ModelRepo {
 Create `ferry/src/main/java/io/github/nthuat/ferry/HuggingFace.kt`:
 
 ```kotlin
-package io.github.nthuat.ferry
+package dev.thuat.ferry
 
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -430,7 +430,7 @@ Headroom exists because a filesystem at exactly zero free bytes misbehaves in wa
 Create `ferry/src/test/java/io/github/nthuat/ferry/SpaceCheckTest.kt`:
 
 ```kotlin
-package io.github.nthuat.ferry
+package dev.thuat.ferry
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -530,7 +530,7 @@ Expected: FAIL at compilation — `Unresolved reference 'SpaceCheck'`.
 Create `ferry/src/main/java/io/github/nthuat/ferry/SpaceCheck.kt`:
 
 ```kotlin
-package io.github.nthuat.ferry
+package dev.thuat.ferry
 
 import java.io.File
 
@@ -656,7 +656,7 @@ Comparison is case-insensitive because hubs are inconsistent about hex case, and
 Create `ferry/src/test/java/io/github/nthuat/ferry/Sha256Test.kt`:
 
 ```kotlin
-package io.github.nthuat.ferry
+package dev.thuat.ferry
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -738,7 +738,7 @@ Expected: FAIL at compilation — `Unresolved reference 'Sha256'`.
 Create `ferry/src/main/java/io/github/nthuat/ferry/Sha256.kt`:
 
 ```kotlin
-package io.github.nthuat.ferry
+package dev.thuat.ferry
 
 import java.io.File
 import java.security.MessageDigest
@@ -821,7 +821,7 @@ Sequential downloads only. Parallel is faster, multiplies peak memory, and makes
 Create `ferry/src/test/java/io/github/nthuat/ferry/RepoDownloaderTest.kt`:
 
 ```kotlin
-package io.github.nthuat.ferry
+package dev.thuat.ferry
 
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
@@ -1060,7 +1060,7 @@ Expected: FAIL at compilation — `Unresolved reference 'RepoDownloader'`.
 Create `ferry/src/main/java/io/github/nthuat/ferry/RepoDownloader.kt`:
 
 ```kotlin
-package io.github.nthuat.ferry
+package dev.thuat.ferry
 
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -1292,7 +1292,7 @@ The facade must not construct anything the host might want to own — no dispatc
 Create `ferry/src/test/java/io/github/nthuat/ferry/FerryTest.kt`:
 
 ```kotlin
-package io.github.nthuat.ferry
+package dev.thuat.ferry
 
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
@@ -1374,7 +1374,7 @@ Expected: FAIL at compilation — `Unresolved reference 'Ferry'`.
 Create `ferry/src/main/java/io/github/nthuat/ferry/Ferry.kt`:
 
 ```kotlin
-package io.github.nthuat.ferry
+package dev.thuat.ferry
 
 import okhttp3.OkHttpClient
 
@@ -1495,7 +1495,7 @@ Two properties matter, and both are mechanically checkable:
 Create `ferry/src/test/java/io/github/nthuat/ferry/EmbeddabilityTest.kt`:
 
 ```kotlin
-package io.github.nthuat.ferry
+package dev.thuat.ferry
 
 import kotlinx.coroutines.runBlocking
 import okhttp3.Interceptor

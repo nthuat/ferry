@@ -1,0 +1,420 @@
+package dev.thuat.ferry
+
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.IOException
+
+/** What the download is doing, at a granularity a progress UI can render without guessing. */
+sealed interface RepoProgress {
+
+    data class CheckingSpace(val repoId: String) : RepoProgress
+
+    data class Downloading(
+        val repoId: String,
+        val path: String,
+        val fileIndex: Int,
+        val fileCount: Int,
+        val bytesWritten: Long,
+        val fileBytes: Long,
+    ) : RepoProgress
+
+    data class Verifying(val repoId: String, val path: String) : RepoProgress
+
+    data class Complete(val repoId: String, val dir: File) : RepoProgress
+}
+
+/** Carries the report so a caller can say how much space is missing, not merely that some is. */
+class InsufficientSpaceException(val report: SpaceReport) : IOException(
+    "needs ${report.requiredBytes} bytes, ${report.freeBytes} free, " +
+        "short by ${report.shortfallBytes}",
+)
+
+/**
+ * A downloaded file is not what the manifest said it would be.
+ *
+ * [reason] carries the specific mismatch because the two causes need different responses: a wrong
+ * SHA-256 is corruption in transit, a wrong size is usually an intermediary answering with something
+ * that is not the file at all — a captive portal's login page arrives with a perfectly consistent
+ * Content-Length and would otherwise pass every check.
+ */
+class VerificationException(
+    val path: String,
+    val reason: String,
+) : IOException("$path failed verification: $reason")
+
+/**
+ * Names a committed directory as Ferry's own, and records which repo id owns it.
+ *
+ * Lives at `target/.ferry`, inside the repo's own directory, written into staging so the same
+ * `renameTo` that publishes the repo's content publishes the marker with it, and read back from
+ * `target` itself before any replace. That co-location is the entire safety property: the marker
+ * lives and dies with exactly the directory it describes. A directory removed out of band — the
+ * only way to delete a model, per this file's own refusal message — takes its marker with it, so
+ * nothing is left to misdescribe whatever gets put at that path afterwards. An earlier version of
+ * this fix moved ownership into a side tree keyed by name instead of by directory; nothing ever
+ * deleted an entry there, so a directory removed out of band and replaced with foreign content
+ * inherited the old commit's ownership and was deleted to make room for a new one — the exact class
+ * of bug this file exists to guard against. Reverted for that reason; see
+ * docs/known-limitations.md's closed entry on this and its discussion of what still moved.
+ *
+ * The commit step replaces whatever sits at the target path, and one repo id is free to be a
+ * directory prefix of another — "owner" and "owner/model" are both ordinary ids, and both resolve
+ * to strict children of the download root, so no containment check on the id alone can tell them
+ * apart. Ferry therefore deletes only what it wrote under this exact id: a directory with no
+ * marker, or a marker naming a different id, is refused rather than removed. Telling whether
+ * something is committed *nested inside* this id is a different question, answered by a separate
+ * shadow tree — see [download]'s own nested-check comment for why that one could not stay
+ * co-located the same way: a hub's manifest can declare a file at any path in the real tree,
+ * including one that happens to be named `.ferry`, and nothing there can tell that file apart from
+ * a marker by name alone (docs/known-limitations.md's closed entry).
+ */
+private const val MARKER_FILE = ".ferry"
+
+/**
+ * The root of a shadow tree, sibling to every repo under `into`, that records only *which* repo ids
+ * have been committed — never what they contain, and never anything resembling the ownership
+ * question [MARKER_FILE] answers.
+ *
+ * Named the same as [MARKER_FILE] — this directory and that file share nothing but a name; Ferry
+ * never conflates them. `into/.ferry/X` exists as a plain, possibly-empty directory once repo id
+ * `X` is committed, mirroring `into` one-for-one the way `into/.staging/X` already does for staging.
+ * A nested id like `X/Y` then creates `into/.ferry/X/Y` as `X`'s own child, without needing to tell
+ * `X`'s entry apart from `Y`'s the way a leaf-file scheme would — a directory can always gain
+ * another child, so no two ids ever compete for the same path here regardless of commit order.
+ *
+ * A shadow entry is written once and never deleted — there is no API that would tell it to be, any
+ * more than there is one to clear an ordinary refusal. That makes every entry here a *candidate*
+ * nested id, not proof of one still being real: the real directory it names may since have been
+ * removed out of band, or may never have existed if the commit that would have written it crashed
+ * first. [download]'s nested-check cross-references each candidate against the real tree before
+ * trusting it, which is what lets a stale entry sit here harmlessly forever rather than block
+ * anything — see that check's own comment.
+ */
+private const val MARKER_ROOT = MARKER_FILE
+
+/**
+ * Downloads a whole model repository, or none of it.
+ *
+ * Files land in a staging directory and are moved into place only once every one of them has
+ * verified, so a model loader pointed at the target directory can never observe a repo that is
+ * half-written or half-correct.
+ */
+class RepoDownloader(
+    private val repo: ModelRepo,
+    private val downloader: ResumableDownloader,
+    private val spaceCheck: SpaceCheck = SpaceCheck(),
+    private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
+) {
+
+    /**
+     * Downloads [repoId] into a directory under [into] and returns it.
+     *
+     * **Not safe to call concurrently for the same [repoId] and [into].** Both calls stage into the
+     * same scratch directory, so the first to finish deletes the other's in-flight work, and a
+     * rename by one while the other still holds open file descriptors into it follows the inode
+     * into the committed repo — writing into a directory that has already been verified. Serialising
+     * calls per repo id is the caller's responsibility; different repo ids are independent.
+     */
+    suspend fun download(
+        repoId: String,
+        into: File,
+        onProgress: (RepoProgress) -> Unit = {},
+    ): Result<File> = withContext(dispatcher) {
+        val manifest = repo.manifest(repoId).getOrElse { return@withContext Result.failure(it) }
+
+        // An empty manifest is a listing that failed without saying so — a hub answering 200 with
+        // [], a revision that does not exist, a filter that matched nothing. Refused here because
+        // every downstream check is written as "every file is correct", and every file of no files
+        // is trivially correct: the cache check would call any directory that happened to exist a
+        // hit and return it, and with nothing there the commit step would publish a repo containing
+        // only its own marker. Both are permanent cache hits that no later call can repair.
+        if (manifest.files.isEmpty()) {
+            return@withContext Result.failure(IOException("no files listed for $repoId"))
+        }
+
+        var staging: File? = null
+        try {
+            // repoId is used as a relative path rather than flattened into one directory name, so
+            // two distinct ids (e.g. "a/b" and "a--b") can never collide onto the same directory.
+            //
+            // staging is validated against stagingRoot (into/.staging), not against `into` itself:
+            // `into` is loose enough to contain `.staging`, `.ferry`, and every already-committed
+            // repo, so a repoId like "../<other-repo>" resolves to that other repo's own directory
+            // and would still pass a check against `into`. Shrinking the boundary to the one
+            // directory a repoId's staging copy is actually allowed to land in closes that.
+            val stagingRoot = File(into, ".staging")
+            val stagingDir = resolveInside(stagingRoot, repoId)
+            staging = stagingDir
+            val target = resolveInside(into, repoId)
+
+            // Which ids are committed *nested inside* repoId — see MARKER_ROOT's doc for the shape
+            // and why it is a separate tree from the ownership marker. markerDir is repoId's own
+            // slot: empty until something nests inside it, at which point it gains a child.
+            val markerRoot = File(into, MARKER_ROOT)
+            val markerDir = resolveInside(markerRoot, repoId)
+
+            // A repoId of ".staging/evil" or ".ferry/evil" never leaves `into` (so resolveInside's
+            // own "strictly inside into" check misses both), but a target there collides with a
+            // namespace `into` reserves for Ferry's own bookkeeping — staging or markers — which
+            // would let one repo's commit clobber another repo's in-flight staging copy, or the
+            // marker namespace itself, rather than just being an ordinary sibling directory.
+            val targetPath = target.canonicalPath
+            if (collidesWith(targetPath, stagingRoot)) {
+                throw IOException("repo id collides with the staging area: $repoId")
+            }
+            if (collidesWith(targetPath, markerRoot)) {
+                throw IOException("repo id collides with the marker directory: $repoId")
+            }
+
+            // Already here and still correct: the cheapest possible outcome, and the one a naive
+            // implementation misses by re-fetching gigabytes the device is already holding.
+            //
+            // Inside the try: isSatisfiedBy re-hashes existing files, which is I/O and can throw
+            // the same way every other read in this method can, and must become Result.failure
+            // rather than escape the public boundary.
+            //
+            // Checked before free space, not after: a repo already present and verified needs no
+            // space at all, and must not be refused because the device that already holds it has
+            // since filled up. Nothing above this line writes anything, so a hit is returned here
+            // having touched the filesystem only to read it.
+            if (target.isDirectory && manifest.isSatisfiedBy(target)) {
+                onProgress(RepoProgress.Complete(repoId, target))
+                return@withContext Result.success(target)
+            }
+
+            // Before the first byte: spending a user's data allowance to discover the disk is full
+            // is the failure this library exists to prevent. Run from inside the try, same as the
+            // cache-hit check above it: a probe is caller-supplied and free to throw, and that
+            // failure must become Result.failure like every other I/O in this method, not escape
+            // the public boundary.
+            //
+            // into may not exist yet — a clean install's first-ever download into a fresh directory
+            // is the ordinary case, not an edge case — and passed straight through to whichever
+            // FreeSpaceProbe the caller configured. Handling that is SpaceCheck's default probe's own
+            // job (see DefaultFreeSpaceProbe's doc in SpaceCheck.kt), not this call site's: fixing it
+            // here would only protect callers who go through RepoDownloader, and SpaceCheck is public,
+            // usable directly for a preflight check without ever calling download() at all.
+            onProgress(RepoProgress.CheckingSpace(repoId))
+            val report = spaceCheck.check(manifest, into)
+            if (!report.sufficient) {
+                return@withContext Result.failure(InsufficientSpaceException(report))
+            }
+
+            stagingDir.mkdirs()
+
+            manifest.files.forEachIndexed { index, remote ->
+                // remote.path comes from the hub's manifest over the network — untrusted the same
+                // way repoId is. Without this, a hostile listing could write anywhere on disk.
+                val destination = resolveInside(stagingDir, remote.path)
+                destination.parentFile?.mkdirs()
+
+                downloader.download(
+                    url = remote.url,
+                    target = destination,
+                ) { written, _ ->
+                    onProgress(
+                        RepoProgress.Downloading(
+                            repoId = repoId,
+                            path = remote.path,
+                            fileIndex = index,
+                            fileCount = manifest.files.size,
+                            bytesWritten = written,
+                            fileBytes = remote.sizeBytes,
+                        ),
+                    )
+                }.getOrElse { return@withContext Result.failure(it) }
+
+                onProgress(RepoProgress.Verifying(repoId, remote.path))
+
+                // Checked here and not delegated: ResumableDownloader compares what it wrote
+                // against the *server's own* declared length, so a self-consistent wrong response
+                // — a captive portal's login page, a hub serving an error document with a correct
+                // Content-Length — satisfies it at any size. This is the only place the manifest's
+                // figure is ever consulted, and for a file the hub published no sha256 for it is
+                // the whole of the verification.
+                //
+                // Unconditional, not guarded on `remote.sizeBytes > 0` as this once was: that guard
+                // treated a declared 0 as "unknown, skip the check", but isSatisfiedBy below has never
+                // had a matching guard — it compares onDisk.length() == remote.sizeBytes unconditionally
+                // — so the two disagreed. A hub declaring an explicit 0 could pass a non-empty body
+                // here and then fail isSatisfiedBy on every later call forever: committed once, never a
+                // cache hit again (docs/known-limitations.md's closed entry on this). Dropping the guard
+                // here instead treats a declared 0 the same way isSatisfiedBy always has: a real
+                // assertion that the file is empty, checked, not an "unknown size" sentinel skipped.
+                // Neither HuggingFace nor ModelScope was ever observed omitting a real file's size this
+                // way — both always publish an explicit figure for a "file"/"blob" entry — so this
+                // costs neither adapter anything today; it only stops trusting a hub that starts
+                // publishing a real, checkable zero.
+                if (destination.length() != remote.sizeBytes) {
+                    return@withContext Result.failure(
+                        VerificationException(
+                            remote.path,
+                            "expected ${remote.sizeBytes} bytes, got ${destination.length()}",
+                        ),
+                    )
+                }
+
+                // A null sha256 means the hub published none; the size check above is then the only
+                // acceptance test, which is weaker and unavoidable.
+                if (remote.sha256 != null && !Sha256.matches(destination, remote.sha256)) {
+                    return@withContext Result.failure(
+                        VerificationException(remote.path, "sha256 mismatch"),
+                    )
+                }
+            }
+
+            // Written into staging rather than into target after the rename, so the rename commits
+            // the marker atomically with the repo: a reader never sees a committed directory that
+            // has no marker, and a crash between the two cannot strand a repo that is then refused
+            // forever, or — the sharper failure — leave a marker whose directory is gone, standing
+            // ready to misdescribe whatever gets put at that path next. Written after the download
+            // loop, so a manifest entry literally named ".ferry" *at the repo root* cannot forge
+            // ownership of a directory — Ferry's own write always lands last, overwriting it. A
+            // manifest entry named ".ferry" *in a subdirectory* is not shadowed by this at all and
+            // downloads as ordinary content: this write only ever touches stagingDir's own root.
+            File(stagingDir, MARKER_FILE).writeText(repoId)
+
+            if (target.exists()) {
+                // An absent marker is a refusal, not an exception: something Ferry did not write is
+                // sitting here, and that is precisely what must not be deleted to make room.
+                val marker = File(target, MARKER_FILE)
+                if (!marker.isFile || marker.readText() != repoId) {
+                    throw IOException(
+                        "$target was not committed by Ferry under '$repoId'; refusing to replace " +
+                            "it — remove the directory to retry",
+                    )
+                }
+
+                // A marker matching repoId at $target only says Ferry committed *this* directory
+                // under this id — it says nothing about what got committed underneath it since.
+                // "owner" and "owner/model" are both ordinary ids (see MARKER_FILE's doc): committing
+                // "owner/model" writes its own marker at target/model/.ferry without objection,
+                // because into/owner/model does not exist yet when it commits. A later
+                // download("owner") would otherwise sail past the check above — its own marker
+                // still matches — and deleteRecursively() would take the nested repo with it.
+                //
+                // Answered by the shadow tree (MARKER_ROOT's doc), not by walking target's own
+                // subtree the way this used to: a hub's manifest can put a file named ".ferry" at
+                // any depth in the real tree, and nothing in that tree can tell it apart from a real
+                // nested marker by name alone (docs/known-limitations.md's closed entry) — the walk
+                // this replaces was exactly that guess. markerDir's children are never that
+                // ambiguous, because only Ferry ever writes there, but they are not proof either: a
+                // shadow entry is never deleted, so it can name an id whose real directory was since
+                // removed out of band, or one whose commit crashed before ever creating it. Cross-
+                // referencing each candidate against `File(target, candidate.name).exists()` is what
+                // tells a genuinely-nested repo apart from a stale entry — real content wins the
+                // refusal, a stale entry loses it and blocks nothing, which is also what makes
+                // removing the nested repo the refusal names actually clear that refusal afterwards.
+                val nestedChild = markerDir.listFiles()?.firstOrNull { File(target, it.name).exists() }
+                if (nestedChild != null) {
+                    throw IOException(
+                        "$target contains a repo committed under '$repoId/${nestedChild.name}'; " +
+                            "refusing to replace it — remove that nested repo first",
+                    )
+                }
+
+                if (!target.deleteRecursively()) {
+                    return@withContext Result.failure(IOException("cannot replace $target"))
+                }
+            }
+
+            // Records repoId itself as a candidate nested id for whichever ancestor id, if any, is
+            // ever checked against it later — see MARKER_ROOT's doc. Written before the rename, not
+            // after: a crash in between leaves this entry naming a directory that turns out not to
+            // exist yet, which the nested check above already treats as a stale, harmless candidate.
+            // The other order would leave the opposite: real, committed content with no shadow entry
+            // at all, invisible to an ancestor's nested check, which would then delete it for real —
+            // the one direction that actually loses something that was there. Only one mkdirs() call,
+            // not a write too: nothing is ever read back out of this tree's own content, only its
+            // shape, so recording repoId here needs nothing more than the directory existing.
+            markerDir.mkdirs()
+            if (!markerDir.isDirectory) {
+                return@withContext Result.failure(IOException("cannot record $repoId as committed"))
+            }
+
+            target.parentFile?.mkdirs()
+            if (!stagingDir.renameTo(target)) {
+                return@withContext Result.failure(IOException("cannot commit $target"))
+            }
+
+            onProgress(RepoProgress.Complete(repoId, target))
+            Result.success(target)
+        } catch (e: IOException) {
+            Result.failure(e)
+        } finally {
+            // Staging survives only as long as the attempt. ResumableDownloader keeps its own
+            // .part files inside it, so removing it here forfeits resume; that is the trade for
+            // never leaving a half-repo on disk, and is revisited when resume-across-launch lands.
+            //
+            // Captured in the outer `staging` var rather than recomputed here: a second, independent
+            // resolveInside call in finally is exactly what let a too-loose boundary check silently
+            // agree with itself and delete an unrelated, already-committed repo. Reusing the one
+            // validated value means there is only one computation to get right, and if it was never
+            // assigned — repoId was rejected before staging was known — there is nothing to clean up.
+            staging?.deleteRecursively()
+        }
+    }
+
+    /**
+     * Whether [dir] already holds every file of this manifest, at the right size, with the right
+     * hash where one was published.
+     *
+     * Deliberately re-hashes rather than trusting a marker file: a marker records what was true
+     * once, and the point of the check is what is true now.
+     *
+     * `onDisk.length() == remote.sizeBytes` is unconditional — including when `remote.sizeBytes` is
+     * 0 — and always has been. The post-download check in `download()` above now matches it exactly,
+     * for the same reason: the two used to disagree (that check skipped entirely on a declared 0),
+     * which let a hub declaring an explicit zero pass a non-empty body on download and then fail
+     * this check on every later call forever. A declared 0 is treated as a real, checked assertion
+     * that the file is empty in both places now, not "unknown, don't check" in one and enforced in
+     * the other.
+     */
+    private fun RepoManifest.isSatisfiedBy(dir: File): Boolean = files.all { remote ->
+        val onDisk = resolveInside(dir, remote.path)
+        onDisk.isFile &&
+            onDisk.length() == remote.sizeBytes &&
+            (remote.sha256 == null || Sha256.matches(onDisk, remote.sha256))
+    }
+
+    /**
+     * Whether canonical path [targetPath] is, or falls strictly inside, [reservedRoot].
+     *
+     * Separate from [resolveInside]: that function only rejects a path that escapes its parent, and
+     * both `.staging` and `.ferry` are ordinary strict children of `into`, not escapes — this is the
+     * narrower check that a repoId did not resolve onto one of the handful of names `into` itself
+     * reserves for Ferry's own bookkeeping.
+     */
+    private fun collidesWith(targetPath: String, reservedRoot: File): Boolean {
+        val reservedPath = reservedRoot.canonicalPath
+        return targetPath == reservedPath || targetPath.startsWith(reservedPath + File.separator)
+    }
+
+    /**
+     * Resolves [relative] inside [parent] and fails if it escapes.
+     *
+     * Repo ids come from the calling app and file paths come from the hub's manifest over the
+     * network, so neither can be trusted to stay inside the directory it is joined to. Canonical
+     * paths are compared rather than the raw strings so that "..", symlinks, and redundant
+     * separators are all resolved before the comparison rather than pattern-matched.
+     *
+     * Strictly inside: resolving to [parent] itself is rejected, not tolerated as a base case.
+     * File(parent, "") and File(parent, ".") are both exactly parent, so permitting equality made
+     * an empty repo id — a blank search field, a null coalesced to "" — resolve `target` onto the
+     * download root, whose commit step then deleteRecursively()s every repo the user had. None of
+     * this method's callers wants the parent: a repo never stages as the whole staging area, a
+     * target is never the download root, a repo's own shadow directory never sits directly at the
+     * marker root, and a file is never the directory containing it.
+     */
+    private fun resolveInside(parent: File, relative: String): File {
+        val candidate = File(parent, relative)
+        val root = parent.canonicalPath
+        val resolved = candidate.canonicalPath
+        if (resolved == root || !resolved.startsWith(root + File.separator)) {
+            throw IOException("path must resolve strictly inside $parent: $relative")
+        }
+        return candidate
+    }
+}
