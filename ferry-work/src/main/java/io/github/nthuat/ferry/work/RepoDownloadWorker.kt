@@ -42,12 +42,25 @@ import androidx.work.ListenableWorker.Result as WorkResult
  * [RepoDownloader.download] can fail with [InsufficientSpaceException] (holds a
  * [io.github.nthuat.ferry.SpaceReport]), [VerificationException] (names a path), or a bare
  * [java.io.IOException] (a dropped connection, an HTTP error, a refused overwrite — see Retry).
- * Today only [InsufficientSpaceException] ever reaches [WorkResult.failure]: [KEY_FAILURE_REASON]
- * is [REASON_INSUFFICIENT_SPACE], [KEY_FAILURE_MESSAGE] is its message, and
- * [KEY_REQUIRED_BYTES] / [KEY_FREE_BYTES] / [KEY_SHORTFALL_BYTES] are its report's own numbers.
- * What is lost even here: the exception's Java type (the [String] reason stands in for it), any
- * cause chain, and a stack trace — none of those are primitives. [VerificationException.path] is
- * lost entirely, not merely narrowed — see Retry for why, and what a host can do instead.
+ * Three distinct reasons reach [WorkResult.failure] today, each in [KEY_FAILURE_REASON]:
+ * [REASON_INVALID_INPUT] (bad enqueue, caught before any of the above ever runs),
+ * [REASON_INSUFFICIENT_SPACE] ([KEY_FAILURE_MESSAGE] plus [KEY_REQUIRED_BYTES] /
+ * [KEY_FREE_BYTES] / [KEY_SHORTFALL_BYTES] from the report), and [REASON_RETRIES_EXHAUSTED]
+ * ([KEY_FAILURE_MESSAGE] alone — see Retry for when this one fires). What is lost even so: the
+ * exception's Java type (a [String] reason stands in for it), any cause chain, and a stack trace —
+ * none of those are primitives. [VerificationException.path] is never carried structurally, in
+ * either terminal state; it survives only as text, inside [KEY_FAILURE_MESSAGE], because
+ * [VerificationException]'s own `message` already embeds the path (see its KDoc in `:ferry`) — see
+ * Retry for why this exception in particular usually reaches [REASON_RETRIES_EXHAUSTED] rather
+ * than [WorkResult.retry] forever.
+ *
+ * Progress carries less structure than either terminal state: [toProgressData] reports only a
+ * phase name and, for [RepoProgress.Downloading], byte/file counters — [RepoProgress.Downloading.path],
+ * [RepoProgress.Verifying.path] and [RepoProgress.Complete.dir] are all dropped, and
+ * `repoId` is never repeated since the host already supplied it as input. Progress is a much
+ * higher-frequency boundary than the terminal result — see Progress below — and none of those
+ * fields were needed to answer "how far along is this," which is the only question a throttled,
+ * primitives-only progress channel is answering.
  *
  * ## Retry
  *
@@ -75,8 +88,17 @@ import androidx.work.ListenableWorker.Result as WorkResult
  * retry for the life of the install, waking the device and re-downloading a possibly multi-gigabyte
  * repo each time to fail identically. Retrying it at all is still correct — most verification
  * failures are transit corruption, which a second attempt fixes — but the retry needs a ceiling for
- * the case where it will not. [MAX_RETRY_ATTEMPTS] is that ceiling, read off [runAttemptCount]
- * (1 on the first call, WorkManager's own count of tries so far): [MAX_RETRY_ATTEMPTS] chosen as
+ * the case where it will not. [MAX_RETRY_ATTEMPTS] is that ceiling, read off [runAttemptCount] —
+ * **`0` on a worker's real first execution, not `1`.** `WorkerWrapper` (in `work-runtime`) builds
+ * a worker's [WorkerParameters] from `WorkSpec.runAttemptCount` — which defaults to `0` for a
+ * freshly enqueued item — and only increments the stored count afterwards, when it marks the work
+ * running; the worker itself never observes the post-increment value for its own attempt. So real
+ * attempts are numbered 0, 1, 2, … from this class's point of view, one behind how a human would
+ * count them. [attemptNumber] converts to that 1-based count once, so the comparison below reads
+ * as "attempt number versus how many are allowed" rather than repeating a `+ 1` at every call site.
+ * (`TestListenableWorkerBuilder` defaults `runAttemptCount` to `1`, not `0` — a test-harness
+ * convenience, not the value any real first attempt has; [RepoDownloadWorkerTest] sets it
+ * explicitly rather than relying on either default.) [MAX_RETRY_ATTEMPTS] itself is chosen as
  * "a few, not many" — enough that an ordinary transient blip (a dropped wifi handoff, a brief 5xx)
  * gets several real chances across a growing backoff window, small enough that a permanently bad
  * file stops re-downloading a large repo after a handful of full attempts rather than for the life
@@ -170,6 +192,16 @@ class RepoDownloadWorker(
         }
     }
 
+    /**
+     * This attempt, counted the way a human would — `1` for a worker's real first execution.
+     *
+     * [runAttemptCount] itself is `0` on that same first execution (see the class KDoc's Retry
+     * section for why), so this is `runAttemptCount + 1` computed in exactly one place, rather
+     * than repeating that `+ 1` at every comparison against [MAX_RETRY_ATTEMPTS] — which is itself
+     * how many attempts are allowed, not a raw [runAttemptCount] value to compare against directly.
+     */
+    private val attemptNumber: Int get() = runAttemptCount + 1
+
     private fun failureOrRetry(error: Throwable): WorkResult = when {
         error is InsufficientSpaceException -> WorkResult.failure(
             workDataOf(
@@ -181,8 +213,9 @@ class RepoDownloadWorker(
             ),
         )
         // Below the ceiling: still worth a fresh attempt. At or past it: retrying has already had
-        // its fair chances (see the class KDoc's Retry section for why a bound is needed at all).
-        runAttemptCount < MAX_RETRY_ATTEMPTS -> WorkResult.retry()
+        // its fair chances (see the class KDoc's Retry section for why a bound is needed at all,
+        // and why this compares attemptNumber rather than runAttemptCount directly).
+        attemptNumber < MAX_RETRY_ATTEMPTS -> WorkResult.retry()
         else -> WorkResult.failure(
             workDataOf(
                 KEY_FAILURE_REASON to REASON_RETRIES_EXHAUSTED,

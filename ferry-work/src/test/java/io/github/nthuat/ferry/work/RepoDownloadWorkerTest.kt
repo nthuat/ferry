@@ -82,7 +82,14 @@ class RepoDownloadWorkerTest {
         notificationId: Int = 42,
         notifications: RepoDownloadNotifications = RepoDownloadNotifications { _, _ -> Notification() },
         nowMillis: () -> Long = System::currentTimeMillis,
-        runAttemptCount: Int = 1,
+        // 0, not TestListenableWorkerBuilder's own default of 1: verified against work-runtime
+        // 2.11.2's WorkerWrapper source that a worker's real first execution has runAttemptCount
+        // == 0 (WorkSpec.runAttemptCount defaults to 0 and is only incremented, in the database,
+        // after the worker's own WorkerParameters are already built from it). Defaulting the test
+        // helper to the harness's own default here would make every other test in this file quietly
+        // exercise "second real attempt" instead of "first" — see RepoDownloadWorker's own Retry
+        // KDoc section for the full story and why this is not a harmless off-by-one.
+        runAttemptCount: Int = 0,
     ): RepoDownloadWorker {
         val factory = object : WorkerFactory() {
             override fun createWorker(
@@ -140,13 +147,19 @@ class RepoDownloadWorkerTest {
     /**
      * The other half of the same distinction: a dropped connection is exactly the kind of failure
      * a later attempt might not hit again, so it must retry rather than give up permanently.
+     *
+     * `runAttemptCount = 0` explicitly, not relying on [buildWorker]'s own default of the same
+     * value: this is the number every real first execution has (see [RepoDownloadWorker]'s Retry
+     * KDoc section) — `TestListenableWorkerBuilder` itself defaults to `1`, so this is the one
+     * value the harness will not hand a test unless it is asked for by name.
      */
     @Test
-    fun `a transient IO failure retries rather than fails`() {
+    fun `a transient IO failure on the real first attempt retries`() {
         val files = listOf(remote("model.bin", 100L))
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
 
-        val result = runBlocking { buildWorker(downloaderFor(files)).doWork() }
+        val worker = buildWorker(downloaderFor(files), runAttemptCount = 0)
+        val result = runBlocking { worker.doWork() }
 
         assertTrue(result is ListenableWorker.Result.Retry)
     }
@@ -154,27 +167,35 @@ class RepoDownloadWorkerTest {
     /**
      * The bound on that same retry: exponential backoff makes attempts less frequent, never fewer,
      * so an always-failing case (a permanently wrong published hash, a permanently offline host)
-     * needs an actual ceiling, not just a longer wait between identical failures. One attempt short
-     * of [RepoDownloadWorker.MAX_RETRY_ATTEMPTS] must still behave like the ordinary case above.
+     * needs an actual ceiling, not just a longer wait between identical failures.
+     *
+     * `runAttemptCount` counts from `0` (see [RepoDownloadWorker]'s Retry section), so the attempt
+     * one short of [RepoDownloadWorker.MAX_RETRY_ATTEMPTS] total attempts sits at
+     * `MAX_RETRY_ATTEMPTS - 2`, not `- 1`: attempts 0..(MAX-2) are the `MAX - 1` retry-eligible
+     * ones, and `MAX - 1` itself is the ceiling the next test below checks.
      */
     @Test
     fun `a transient IO failure one attempt short of the retry ceiling still retries`() {
         val files = listOf(remote("model.bin", 100L))
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
 
-        val worker = buildWorker(downloaderFor(files), runAttemptCount = RepoDownloadWorker.MAX_RETRY_ATTEMPTS - 1)
+        val worker = buildWorker(downloaderFor(files), runAttemptCount = RepoDownloadWorker.MAX_RETRY_ATTEMPTS - 2)
         val result = runBlocking { worker.doWork() }
 
         assertTrue(result is ListenableWorker.Result.Retry)
     }
 
-    /** The ceiling itself: the next attempt must fail outright and say why, rather than retry again. */
+    /**
+     * The ceiling itself: the next attempt must fail outright and say why, rather than retry again.
+     * Zero-based counting puts this at `MAX_RETRY_ATTEMPTS - 1` — the `MAX_RETRY_ATTEMPTS`-th
+     * attempt overall, not the `(MAX_RETRY_ATTEMPTS + 1)`-th.
+     */
     @Test
     fun `a transient IO failure at the retry ceiling fails and reports why`() {
         val files = listOf(remote("model.bin", 100L))
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
 
-        val worker = buildWorker(downloaderFor(files), runAttemptCount = RepoDownloadWorker.MAX_RETRY_ATTEMPTS)
+        val worker = buildWorker(downloaderFor(files), runAttemptCount = RepoDownloadWorker.MAX_RETRY_ATTEMPTS - 1)
         val result = runBlocking { worker.doWork() }
 
         assertTrue(result is ListenableWorker.Result.Failure)
