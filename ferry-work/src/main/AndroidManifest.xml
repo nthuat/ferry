@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Required to run any foreground service (API 28+), and specifically a "dataSync"-typed one
+         (API 34+) — see the <service> override below for why that type. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <application>
+        <!-- WorkManager's own manifest (verified against work-runtime 2.11.2's merged output)
+             declares this service with no foregroundServiceType at all, because WorkManager
+             cannot know in advance what kind of work a host will background. Every worker this
+             module ships backgrounds a network transfer, so it declares "dataSync" here once,
+             rather than requiring every host to know androidx.work's internal service class name
+             and repeat this override itself. A plain (non-tools:replace) declaration: nothing to
+             replace as of 2.11.2, verified above: if a future work-runtime version starts
+             declaring its own type here too, manifest merger will fail loudly on a real conflict
+             rather than this silently overriding it — the safer failure of the two.
+        -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync" />
+    </application>
+</manifest>

@@ -4,7 +4,8 @@ Downloads AI model repositories to Android devices, and refuses to do it badly.
 
 > **Status: core works.** Fetches a HuggingFace, ModelScope or Ollama repo, refuses to start without
 > the disk space to finish it, and verifies every published SHA-256 before committing anything.
-> Backgrounding, pause and resume-across-launch are not done. Not published to Maven.
+> Backgrounding is available as the optional `:ferry-work` module (see below); pause and
+> resume-across-launch are not done. Not published to Maven.
 
 ```kotlin
 val ferry = Ferry.huggingFace()
@@ -253,6 +254,71 @@ Re-check visibly redownloads it instead of trusting what's there. Neither adds a
 ```bash
 ./gradlew :sample:assembleDebug
 ```
+
+## Backgrounding: `:ferry-work`
+
+`:ferry-work` is an optional module that wraps `RepoDownloader.download` in a `CoroutineWorker`,
+with a host-controlled foreground notification, WorkManager's own retry and backoff, and a
+uniqueness guarantee `:ferry` itself cannot provide. It depends on `:ferry`; nothing in `:ferry`
+depends on it — a host with no interest in WorkManager takes only `:ferry` and never notices
+`:ferry-work` exists.
+
+```kotlin
+// settings.gradle.kts
+include(":ferry-work")
+
+// app/build.gradle.kts
+implementation(project(":ferry-work"))
+```
+
+### Why a separate module, not a feature of `:ferry`
+
+`:ferry`'s own `checkEmbeddable` Gradle task fails the build the moment `androidx.work` appears on
+its classpath, and it is wired into `check` — enforced, not merely intended. The reason is this
+README's own "Why this exists" table: Alibaba's MNN backgrounds downloads with a plain foreground
+`Service`; Google's AI Edge Gallery backgrounds them with a `CoroutineWorker`. A `:ferry` that
+required WorkManager would rule MNN's approach out by construction — the exact failure this
+project exists to avoid for a *hub*, one layer up, for a *backgrounding strategy*. Splitting
+backgrounding into its own module, rather than gating it behind a feature flag inside `:ferry`,
+is what makes the exclusion real: a flag can still be compiled in and inspected on the classpath;
+a dependency that is never declared cannot be.
+
+### Design decisions
+
+Full reasoning lives in `RepoDownloadWorker`'s own KDoc; this is the shape of each choice.
+
+- **Input and output.** `repoId`, an absolute `into` path and a notification id go in as
+  `androidx.work.Data` — primitives only. On success, the committed directory's own absolute path
+  comes out, not recomputed from the inputs by this module. On failure, only
+  `InsufficientSpaceException` survives in detail (a reason code, its message, and its
+  `SpaceReport`'s numbers); every other failure loses its exception type and carries no `Data`
+  while it is still retrying — see Retry for when it stops.
+- **Retry.** `InsufficientSpaceException` fails outright: a full device is exactly as full on the
+  next attempt. Everything else retries, including a `VerificationException`, because
+  `RepoDownloader` exposes no richer taxonomy than these two named exceptions plus a bare
+  `IOException` for everything else — a dropped connection and a permanently-corrupt file are not
+  distinguishable by type from outside `:ferry`. That retry is bounded, not indefinite: exponential
+  backoff makes attempts less frequent, never fewer, so a case that will in fact never pass needs
+  an actual ceiling. `RepoDownloadWorker.MAX_RETRY_ATTEMPTS` (5) is that ceiling, read off
+  WorkManager's own `runAttemptCount`; past it, the worker fails with `REASON_RETRIES_EXHAUSTED` in
+  the same `KEY_FAILURE_REASON` field `InsufficientSpaceException` uses, rather than a parallel one.
+- **Progress.** `RepoProgress.Downloading` fires once per read buffer. `RepoDownloadThrottle` — a
+  direct port of `:sample`'s own `DownloadingThrottle`, not a shared dependency, since the only
+  module both could share is `:ferry` — gates both `setProgress` and the notification update to at
+  most once a second, always letting a file's last byte through.
+- **Uniqueness.** `enqueueRepoDownload` wraps `WorkManager.enqueueUniqueWork` with
+  `ExistingWorkPolicy.KEEP`, keyed by repo id: a second enqueue for a repo already running is
+  dropped rather than cancelling and restarting it, which would forfeit whatever had already
+  downloaded. This closes `docs/known-limitations.md`'s concurrent-download entry *within
+  WorkManager*; a host calling `RepoDownloader` directly, outside this enqueue path, is still
+  responsible for serialising itself the way that entry has always said.
+- **Foreground.** The notification's text, icon and actions are supplied by the host through
+  `RepoDownloadNotifications`, never hardcoded by Ferry — the same reasoning that keeps `:ferry`
+  itself free of a UI framework. `:ferry-work`'s own manifest declares
+  `android.permission.FOREGROUND_SERVICE_DATA_SYNC` and overrides WorkManager's
+  `SystemForegroundService` with `android:foregroundServiceType="dataSync"`, verified directly
+  against work-runtime 2.11.2's own merged manifest (which declares neither), so a host does not
+  need to know that internal class name exists at all.
 
 ## Building
 
