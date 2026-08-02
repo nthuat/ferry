@@ -118,6 +118,17 @@ mixes both call paths for the same repo id (one direct call, one enqueued throug
 serialise against, a call it was never part of. Serialising remains the caller's responsibility for
 every path other than "always go through `enqueueRepoDownload` for this repo id."
 
+**Untested, by construction — not merely un-tested.** No automated test exercises
+`enqueueUniqueWork`'s actual dedup behaviour. `RepoDownloadWorkerTest` runs a single
+`RepoDownloadWorker` in isolation via `TestListenableWorkerBuilder`, which never calls
+`WorkManager.enqueueUniqueWork` at all — there is no enqueue step in that test for `KEEP` to act
+on, only a worker instance already built directly. Proving the dedup itself needs a real, running
+`WorkManager` (`WorkManagerTestInitHelper`), which needs a real or Robolectric-backed `Context`;
+this project uses neither anywhere, deliberately (`:ferry`'s own `unitTests.isReturnDefaultValues
+= true` exists to avoid needing exactly that). Not reached for here either, rather than adding an
+instrumented suite this project does not otherwise have. The policy is exercised only by reading —
+this entry, and `RepoDownloadWork.kt`'s own KDoc — not by a passing test.
+
 ## A refused directory needs manual removal
 
 When a target exists without a matching marker, Ferry refuses rather than deleting it — the whole

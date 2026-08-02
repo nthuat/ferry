@@ -291,13 +291,17 @@ Full reasoning lives in `RepoDownloadWorker`'s own KDoc; this is the shape of ea
   `androidx.work.Data` — primitives only. On success, the committed directory's own absolute path
   comes out, not recomputed from the inputs by this module. On failure, only
   `InsufficientSpaceException` survives in detail (a reason code, its message, and its
-  `SpaceReport`'s numbers); every other failure loses its exception type and carries no `Data` at
-  all, because it retries instead of terminating — see Retry.
+  `SpaceReport`'s numbers); every other failure loses its exception type and carries no `Data`
+  while it is still retrying — see Retry for when it stops.
 - **Retry.** `InsufficientSpaceException` fails outright: a full device is exactly as full on the
   next attempt. Everything else retries, including a `VerificationException`, because
   `RepoDownloader` exposes no richer taxonomy than these two named exceptions plus a bare
   `IOException` for everything else — a dropped connection and a permanently-corrupt file are not
-  distinguishable by type from outside `:ferry`.
+  distinguishable by type from outside `:ferry`. That retry is bounded, not indefinite: exponential
+  backoff makes attempts less frequent, never fewer, so a case that will in fact never pass needs
+  an actual ceiling. `RepoDownloadWorker.MAX_RETRY_ATTEMPTS` (5) is that ceiling, read off
+  WorkManager's own `runAttemptCount`; past it, the worker fails with `REASON_RETRIES_EXHAUSTED` in
+  the same `KEY_FAILURE_REASON` field `InsufficientSpaceException` uses, rather than a parallel one.
 - **Progress.** `RepoProgress.Downloading` fires once per read buffer. `RepoDownloadThrottle` — a
   direct port of `:sample`'s own `DownloadingThrottle`, not a shared dependency, since the only
   module both could share is `:ferry` — gates both `setProgress` and the notification update to at

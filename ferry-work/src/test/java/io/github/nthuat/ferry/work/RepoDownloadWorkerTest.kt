@@ -82,6 +82,7 @@ class RepoDownloadWorkerTest {
         notificationId: Int = 42,
         notifications: RepoDownloadNotifications = RepoDownloadNotifications { _, _ -> Notification() },
         nowMillis: () -> Long = System::currentTimeMillis,
+        runAttemptCount: Int = 1,
     ): RepoDownloadWorker {
         val factory = object : WorkerFactory() {
             override fun createWorker(
@@ -92,6 +93,7 @@ class RepoDownloadWorkerTest {
         }
         return TestListenableWorkerBuilder<RepoDownloadWorker>(Application())
             .setWorkerFactory(factory)
+            .setRunAttemptCount(runAttemptCount)
             .setInputData(
                 workDataOf(
                     RepoDownloadWorker.KEY_REPO_ID to repoId,
@@ -147,6 +149,39 @@ class RepoDownloadWorkerTest {
         val result = runBlocking { buildWorker(downloaderFor(files)).doWork() }
 
         assertTrue(result is ListenableWorker.Result.Retry)
+    }
+
+    /**
+     * The bound on that same retry: exponential backoff makes attempts less frequent, never fewer,
+     * so an always-failing case (a permanently wrong published hash, a permanently offline host)
+     * needs an actual ceiling, not just a longer wait between identical failures. One attempt short
+     * of [RepoDownloadWorker.MAX_RETRY_ATTEMPTS] must still behave like the ordinary case above.
+     */
+    @Test
+    fun `a transient IO failure one attempt short of the retry ceiling still retries`() {
+        val files = listOf(remote("model.bin", 100L))
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
+
+        val worker = buildWorker(downloaderFor(files), runAttemptCount = RepoDownloadWorker.MAX_RETRY_ATTEMPTS - 1)
+        val result = runBlocking { worker.doWork() }
+
+        assertTrue(result is ListenableWorker.Result.Retry)
+    }
+
+    /** The ceiling itself: the next attempt must fail outright and say why, rather than retry again. */
+    @Test
+    fun `a transient IO failure at the retry ceiling fails and reports why`() {
+        val files = listOf(remote("model.bin", 100L))
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START))
+
+        val worker = buildWorker(downloaderFor(files), runAttemptCount = RepoDownloadWorker.MAX_RETRY_ATTEMPTS)
+        val result = runBlocking { worker.doWork() }
+
+        assertTrue(result is ListenableWorker.Result.Failure)
+        assertEquals(
+            RepoDownloadWorker.REASON_RETRIES_EXHAUSTED,
+            (result as ListenableWorker.Result.Failure).outputData.getString(RepoDownloadWorker.KEY_FAILURE_REASON),
+        )
     }
 
     /**

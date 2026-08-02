@@ -69,13 +69,22 @@ import androidx.work.ListenableWorker.Result as WorkResult
  * here rather than worked around, not a change to `:ferry` — see this module's README for why a
  * change there was out of scope for this module in the first place.
  *
- * A consequence worth stating plainly: a [VerificationException] that will in fact never pass —
- * a hub permanently serving the wrong bytes for a path, not a transit corruption — retries
- * forever rather than failing after some bound, because nothing here can tell the two apart and
- * this worker does not guess. The cost is bounded by WorkManager's own backoff, not by this class:
- * a host that wants a hard cutoff can read `runAttemptCount` off the [androidx.work.WorkInfo] this
- * work reports and cancel it — the platform already has that lever, and duplicating it here would
- * only be a second, worse copy of it.
+ * **That split alone is not a bound.** [androidx.work.WorkRequest]'s exponential backoff makes
+ * retries less *frequent*, never fewer — a [VerificationException] that will in fact never pass
+ * (a hub permanently serving the wrong bytes for a path, not a transit corruption) would otherwise
+ * retry for the life of the install, waking the device and re-downloading a possibly multi-gigabyte
+ * repo each time to fail identically. Retrying it at all is still correct — most verification
+ * failures are transit corruption, which a second attempt fixes — but the retry needs a ceiling for
+ * the case where it will not. [MAX_RETRY_ATTEMPTS] is that ceiling, read off [runAttemptCount]
+ * (1 on the first call, WorkManager's own count of tries so far): [MAX_RETRY_ATTEMPTS] chosen as
+ * "a few, not many" — enough that an ordinary transient blip (a dropped wifi handoff, a brief 5xx)
+ * gets several real chances across a growing backoff window, small enough that a permanently bad
+ * file stops re-downloading a large repo after a handful of full attempts rather than for the life
+ * of the install. Past the ceiling, [REASON_RETRIES_EXHAUSTED] reuses [KEY_FAILURE_REASON] rather
+ * than adding a second signal, so a host can tell "exhausted retries" apart from "failed once"
+ * through the one field it already reads. A host wanting a different ceiling has the same lever
+ * this class does — [androidx.work.WorkInfo.getRunAttemptCount] — and can cancel the work itself;
+ * duplicating that as a constructor parameter here would only be a second, worse copy of it.
  *
  * ## Progress
  *
@@ -161,20 +170,26 @@ class RepoDownloadWorker(
         }
     }
 
-    private fun failureOrRetry(error: Throwable): WorkResult =
-        if (error is InsufficientSpaceException) {
-            WorkResult.failure(
-                workDataOf(
-                    KEY_FAILURE_REASON to REASON_INSUFFICIENT_SPACE,
-                    KEY_FAILURE_MESSAGE to (error.message ?: REASON_INSUFFICIENT_SPACE),
-                    KEY_REQUIRED_BYTES to error.report.requiredBytes,
-                    KEY_FREE_BYTES to error.report.freeBytes,
-                    KEY_SHORTFALL_BYTES to error.report.shortfallBytes,
-                ),
-            )
-        } else {
-            WorkResult.retry()
-        }
+    private fun failureOrRetry(error: Throwable): WorkResult = when {
+        error is InsufficientSpaceException -> WorkResult.failure(
+            workDataOf(
+                KEY_FAILURE_REASON to REASON_INSUFFICIENT_SPACE,
+                KEY_FAILURE_MESSAGE to (error.message ?: REASON_INSUFFICIENT_SPACE),
+                KEY_REQUIRED_BYTES to error.report.requiredBytes,
+                KEY_FREE_BYTES to error.report.freeBytes,
+                KEY_SHORTFALL_BYTES to error.report.shortfallBytes,
+            ),
+        )
+        // Below the ceiling: still worth a fresh attempt. At or past it: retrying has already had
+        // its fair chances (see the class KDoc's Retry section for why a bound is needed at all).
+        runAttemptCount < MAX_RETRY_ATTEMPTS -> WorkResult.retry()
+        else -> WorkResult.failure(
+            workDataOf(
+                KEY_FAILURE_REASON to REASON_RETRIES_EXHAUSTED,
+                KEY_FAILURE_MESSAGE to (error.message ?: REASON_RETRIES_EXHAUSTED),
+            ),
+        )
+    }
 
     private fun foregroundInfo(notification: Notification, notificationId: Int): ForegroundInfo =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -239,6 +254,16 @@ class RepoDownloadWorker(
 
         /** [KEY_FAILURE_REASON]: required input ([KEY_REPO_ID]/[KEY_INTO_PATH]/[KEY_NOTIFICATION_ID]) was missing. */
         const val REASON_INVALID_INPUT = "INVALID_INPUT"
+
+        /** [KEY_FAILURE_REASON]: failed on [MAX_RETRY_ATTEMPTS] separate attempts; see the class KDoc's Retry section. */
+        const val REASON_RETRIES_EXHAUSTED = "RETRIES_EXHAUSTED"
+
+        /**
+         * How many attempts — first try plus retries — a non-space failure gets before this worker
+         * gives up rather than returning [androidx.work.ListenableWorker.Result.retry] again. See
+         * the class KDoc's Retry section for why a bound is needed at all and why this number.
+         */
+        const val MAX_RETRY_ATTEMPTS = 5
 
         /** [setProgress] key: one of the `PHASE_*` constants below. */
         const val KEY_PHASE = "phase"
