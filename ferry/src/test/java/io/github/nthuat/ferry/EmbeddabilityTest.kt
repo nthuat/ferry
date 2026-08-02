@@ -36,6 +36,13 @@ class EmbeddabilityTest {
         ] } }
     """.trimIndent()
 
+    private val ollamaManifestJson = """
+        { "schemaVersion": 2, "layers": [
+          { "mediaType": "application/vnd.ollama.image.model", "size": ${configBody.length},
+            "digest": "sha256:8e28eec6e1be158f6ddd03b882aed149db322f3e0824e3dd4c1e860601990a4b" }
+        ] }
+    """.trimIndent()
+
     @Before
     fun setUp() {
         server = MockWebServer().apply { start() }
@@ -106,6 +113,35 @@ class EmbeddabilityTest {
         )
         assertTrue(seenByHost.any { it.endsWith("/repo/files") })
         assertTrue(seenByHost.any { it.endsWith("/repo") })
+    }
+
+    /** Same guarantee again, for the third hub - a structurally different adapter, not just a third copy. */
+    @Test
+    fun `every ollama request goes through the caller's http client`() {
+        val seenByHost = mutableListOf<String>()
+        val hostClient = OkHttpClient.Builder()
+            .addInterceptor(Interceptor { chain ->
+                seenByHost += chain.request().url.encodedPath
+                chain.proceed(chain.request())
+            })
+            .build()
+
+        server.enqueue(MockResponse().setBody(ollamaManifestJson))
+        server.enqueue(MockResponse().setBody(configBody))
+
+        val ferry = Ferry.ollama(
+            client = hostClient,
+            baseUrl = server.url("/").toString().trimEnd('/'),
+        )
+        runBlocking { ferry.download("qwen2.5:0.5b", temp.root) }
+
+        assertEquals(
+            "manifest and blob requests must both be visible to the host",
+            2,
+            seenByHost.size,
+        )
+        assertTrue(seenByHost.any { it.contains("/manifests/") })
+        assertTrue(seenByHost.any { it.contains("/blobs/") })
     }
 
     /**

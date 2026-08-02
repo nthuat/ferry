@@ -2,9 +2,9 @@
 
 Downloads AI model repositories to Android devices, and refuses to do it badly.
 
-> **Status: core works.** Fetches a HuggingFace or ModelScope repo, refuses to start without the disk
-> space to finish it, and verifies every published SHA-256 before committing anything. Backgrounding,
-> pause and resume-across-launch are not done. Not published to Maven.
+> **Status: core works.** Fetches a HuggingFace, ModelScope or Ollama repo, refuses to start without
+> the disk space to finish it, and verifies every published SHA-256 before committing anything.
+> Backgrounding, pause and resume-across-launch are not done. Not published to Maven.
 
 ```kotlin
 val ferry = Ferry.huggingFace()
@@ -156,7 +156,7 @@ right for every hub, including ones nobody has written an adapter for yet.
 
 ### What three hubs look like
 
-HuggingFace and ModelScope are implemented. Ollama is checked against its live API, not adapted yet.
+All three are implemented.
 
 | | HuggingFace | ModelScope | Ollama |
 |---|---|---|---|
@@ -164,10 +164,12 @@ HuggingFace and ModelScope are implemented. Ollama is checked against its live A
 | Auth to list | none | none | none |
 | File identity | `path` | `Path` | **none — digest only** |
 | File type field | `type == "file"` | `Type == "blob"` | every layer is a file |
+| Path synthesis | n/a — the hub names it | n/a — the hub names it | `{mediaType suffix}-{digest}` |
 | SHA-256 | `lfs.oid`, LFS files only | `Sha256`, **every file** | the digest itself |
 | Download | `/{id}/resolve/main/{path}` → 302 | `/api/v1/models/{id}/repo?…&FilePath=` | `/v2/library/{id}/blobs/{digest}` → 307 |
 | Range response | `206` | **`200`** with `Content-Range` | `206` |
-| Default revision | `main` | `master` | a tag, e.g. `0.5b` |
+| Default revision | `main` | `master` | a tag, e.g. `0.5b`, embedded in the id |
+| Pagination | `Link` header, 1000/page | none observed | **none possible — one manifest, no cursor** |
 
 **`Recursive` is case-sensitive, and the wrong case is silently ignored rather than rejected —
 verified live: `Recursive=True` returned 39 entries (21 nested); `recursive=true` returned 18 with
@@ -175,25 +177,49 @@ none nested, HTTP 200 either way, no error.** Copy the capital R and capital T e
 typo here is the same silent truncation `recursive=true` on HuggingFace's `/tree/main` used to
 produce, just spelled differently.
 
-### Which hubs this will actually ship
+**Two Ollama layers can share a mediaType, and naming by suffix alone collides.**
+`llama3.2-vision:11b` ships two `application/vnd.ollama.image.license` layers — verified live. The
+obvious path — the mediaType's last segment, `license` — collides for both, and whichever naive
+implementation drops the second is the exact silent-truncation class HuggingFace's non-recursive
+listing already cost this project once: `RepoManifest.totalBytes` comes out short by one layer, with
+nothing anywhere reporting it. Appending the layer's own digest to the suffix (`license-832dd9e0…`)
+closes this by construction rather than by detecting the collision after the fact: two layers can
+only share a synthesized path if they share both a suffix and a digest, and a shared digest means
+identical content by definition of content-addressing — the same file referenced twice, not a
+collision. `OllamaTest` pins this exact manifest shape so it cannot regress unnoticed.
 
-Two, deliberately.
+### Hub status, and why a third
 
 | Hub | Status |
 |---|---|
 | HuggingFace | implemented |
 | ModelScope | implemented |
-| Ollama | deferred — adapter is straightforward, but its converted GGUFs share no hashes with the others, so it adds surface without compounding |
+| Ollama | implemented |
 | Modelers.cn | **documented, not implemented** — unreachable from where this was written, and an adapter whose only evidence is reading someone else's source is exactly what this project keeps proving to be insufficient |
 | Kaggle Models | no — `403` unauthenticated, needs API-key handling first |
 
-Two is the minimum that proves `ModelRepo` is load-bearing rather than decorative, and these two in
-particular are a hub and its mirror: they publish identical SHA-256 for identical content, so one can
-stand in for the other and be verified against the same expected hash. A third adapter would be a
-third adapter. That is not the same kind of gain.
+HuggingFace and ModelScope are a hub and its mirror: they publish identical SHA-256 for identical
+content, so one can stand in for the other and be verified against the same expected hash. Two of
+those proves `ModelRepo` compiles against a second hub, not that it survives one — both are REST
+listings of named files with per-file content hashes; structurally, neither was ever going to break
+the interface.
 
-Revision belongs to the adapter, not the interface — the two hubs already disagree on its default,
-so a shared parameter would only push the difference up a layer.
+Ollama was added to find out whether a hub *could*. Its manifest is an OCI image manifest, not a
+directory listing: a layer is `mediaType` + `size` + `digest`, no filename anywhere, so
+`RemoteFile.path` has to be synthesized rather than read off the response — the one part of
+`ModelRepo` a HuggingFace-shaped hub can never exercise. It fit without contortion: `ModelRepo` and
+`RemoteFile` needed no change, which `RemoteFile.url`'s own KDoc already anticipated (it is
+adapter-resolved rather than derived from `path` precisely because "not every hub names its files").
+
+Ollama's GGUFs are also a genuinely different artifact from HuggingFace's originals — converted and
+re-quantized, sharing no SHA-256 with either existing hub even for "the same" nominal model — so this
+does not extend the mirroring property above to a third hub; that trade only ever existed between
+HuggingFace and ModelScope.
+
+Revision belongs to the adapter, not the interface — HuggingFace and ModelScope already disagree on
+its default, so a shared parameter would only push the difference up a layer. Ollama has no separate
+revision concept at all: the tag lives inside `repoId` itself, resolved by the adapter, not defaulted
+by a constructor parameter.
 
 ### Four things that get harder than they look
 

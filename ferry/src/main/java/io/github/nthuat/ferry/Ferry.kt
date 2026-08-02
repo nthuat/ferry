@@ -30,4 +30,12 @@ object Ferry {
         repo = ModelScope(client = client, baseUrl = baseUrl, revision = revision),
         downloader = ResumableDownloader(client),
     )
+
+    fun ollama(
+        client: OkHttpClient = OkHttpClient(),
+        baseUrl: String = "https://registry.ollama.ai",
+    ): RepoDownloader = RepoDownloader(
+        repo = Ollama(client = client, baseUrl = baseUrl),
+        downloader = ResumableDownloader(client),
+    )
 }
