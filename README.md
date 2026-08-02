@@ -234,7 +234,16 @@ Re-check visibly redownloads it instead of trusting what's there. Neither adds a
 ./gradlew :ferry:testDebugUnitTest
 ```
 
-Requires JDK 17 and an Android SDK with API 35.
+Requires an Android SDK with API 35, and a JDK between 17 and 21.
+
+The upper bound is Gradle 8.9's, not this project's: a newer JDK fails during script compilation
+with a bare `IllegalArgumentException` naming the JDK's own version and nothing else, which is not
+an obvious diagnosis. If you hit it, point the build at a supported JDK rather than debugging the
+message:
+
+```bash
+JAVA_HOME=/path/to/jdk-21 ./gradlew :ferry:check
+```
 
 ## License
 
