@@ -291,6 +291,22 @@ unwalked.
 not-yet-created path would be created on" short of creating it first, which is the side effect this
 approach exists to avoid.
 
+## Ollama's `config` blob is never fetched
+
+`Ollama.manifest` deliberately excludes the manifest's `config` entry from `RepoManifest.files` —
+see `Ollama.kt`'s own KDoc for the structural argument (`config` describes the layers; `layers` is
+the content). That argument is about what Ollama's `config` shape is *for*, not a guarantee about
+what every model's `config` blob will ever contain.
+
+**Condition:** a future Ollama model puts something in `config` that a consumer of the downloaded
+files actually needs — not observed in any manifest this adapter was built against, but nothing in
+the OCI manifest format rules it out either.
+
+**Consequence:** Ferry has no way to surface it. `config`'s own `mediaType`, `size` and `digest` are
+not parsed at all (`ignoreUnknownKeys` drops the field), so today there is no field anywhere to read
+it from, let alone fetch it — not a silent truncation of something this adapter tried to list, but a
+category of content it never lists in the first place.
+
 ## Ollama repo ids outside `library/` are unverified
 
 `Ollama.manifest` builds `/v2/{namespace}/{name}/manifests/{tag}` for any `repoId`, defaulting the

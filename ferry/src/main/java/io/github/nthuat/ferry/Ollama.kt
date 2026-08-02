@@ -45,10 +45,14 @@ class Ollama(
 
             // qualifiedName travels through addPathSegments rather than string interpolation, the
             // same reason HuggingFace/ModelScope's repoId does (see ModelScope.manifest's KDoc): a
-            // "?", "#" or "&" inside it can't reinterpret this request's query, and a ".." can't
-            // retarget it either, because requireWithinNamespace below asserts the built URL still
-            // starts under "v2" - the one segment every OCI distribution request lives under - before
-            // the request is issued.
+            // "?", "#" or "&" inside it can't reinterpret this request's query, and a ".." inside
+            // qualifiedName can't escape the "v2" namespace either, because requireWithinNamespace
+            // below asserts the built URL still starts under "v2" - the one segment every OCI
+            // distribution request lives under - before the request is issued. A ".." positioned
+            // later - as tag itself, e.g. - can still pop "manifests" without ever popping below
+            // "v2", landing a same-origin, same-namespace request that is simply malformed rather
+            // than retargeted. That residual is accepted project-wide, not specific to this adapter
+            // (docs/known-limitations.md's "Residual" paragraph on this same mechanism).
             val namespace = registryNamespace(base)
             val manifestUrl = namespace.newBuilder()
                 .addPathSegments(qualifiedName)
@@ -86,16 +90,19 @@ class Ollama(
 
                 // Every layer's digest is checked before any is mapped, rather than mapping and
                 // failing partway: a manifest half-translated into RemoteFiles is never handed back,
-                // only a complete one or none. Ollama has only ever been observed publishing sha256
-                // (verified live), but OCI's digest grammar allows other algorithms, and
+                // only a complete one or none. Checked against the full "sha256:" + 64 lowercase hex
+                // shape, not just the prefix: OCI's digest grammar allows other algorithms, and
                 // RemoteFile.sha256 is specifically a SHA-256 - silently treating another algorithm's
                 // hex as though it were one would fail verification later, at download time, for a
-                // reason indistinguishable from real corruption.
+                // reason indistinguishable from real corruption. A prefix-only check would also let a
+                // malformed remainder - too short, uppercase, non-hex - land unvalidated directly in
+                // RemoteFile.path (see layerSuffix's own path-segment concern below for why an
+                // unvalidated string ending up in path is worth being strict about here too).
                 val badDigest = parsed.layers.map { it.digest }
-                    .firstOrNull { !it.startsWith(SHA256_PREFIX) }
+                    .firstOrNull { !SHA256_DIGEST.matches(it) }
                 if (badDigest != null) {
                     return@withContext Result.failure(
-                        IOException("layer digest for $repoId is not sha256: $badDigest"),
+                        IOException("layer digest for $repoId is not a well-formed sha256 digest: $badDigest"),
                     )
                 }
 
@@ -113,21 +120,34 @@ class Ollama(
                 val files = parsed.layers.map { layer ->
                     val hex = layer.digest.removePrefix(SHA256_PREFIX)
                     RemoteFile(
-                        // Collision-proof by construction: two layers can share this path only if
-                        // they share both a mediaType suffix and a digest, and a shared digest means
-                        // identical content by definition of content-addressing - the same file
-                        // referenced twice, not a collision. This is what tells
-                        // llama3.2-vision:11b's two "image.license" layers apart (OllamaTest pins
-                        // this exact shape): same suffix, different digest, different path. Naming
-                        // by suffix alone - the obvious mapping - collides there and silently drops
-                        // one, the same silent-truncation class HuggingFace's non-recursive listing
-                        // already cost this project once.
+                        // Two layers can share this path only if they share both a mediaType suffix
+                        // and a digest, and a shared digest means identical content by definition of
+                        // content-addressing - the same file referenced twice, not a collision. This
+                        // is what tells llama3.2-vision:11b's two "image.license" layers apart
+                        // (OllamaTest pins this exact shape): same suffix, different digest,
+                        // different path. Naming by suffix alone - the obvious mapping - collides
+                        // there and silently drops one, the same silent-truncation class
+                        // HuggingFace's non-recursive listing already cost this project once.
                         path = "${layerSuffix(layer.mediaType)}-$hex",
                         url = blobUrl(base, qualifiedName, layer.digest),
                         sizeBytes = layer.size,
                         sha256 = hex,
                     )
                 }
+                    // The formula above is collision-resistant, not collision-proof, on its own: two
+                    // layers that share both suffix and digest - the same content, listed twice, not
+                    // merely similar content - still map to two RemoteFiles with an identical path,
+                    // and every layer is mapped unconditionally, so totalBytes would count those
+                    // bytes twice and SpaceCheck would over-reserve for them. distinctBy closes that
+                    // by treating identical-path entries as the one file they actually are.
+                    //
+                    // Deliberately keyed on path, not digest: two *different* suffixes can legitimately
+                    // share a digest - an empty "system" prompt and an empty "params" file hash the
+                    // same - and are two real, distinct files that must not collapse into one
+                    // (OllamaTest's "two layers with the same digest but different mediaType" pins
+                    // this). path already encodes both suffix and digest, so deduping on it dedupes
+                    // exactly the same-suffix-same-digest case and nothing broader.
+                    .distinctBy { it.path }
                 Result.success(RepoManifest(repoId = repoId, files = files))
             }
         } catch (e: IOException) {
@@ -188,8 +208,16 @@ class Ollama(
      * "template", "license", "params" observed live (`application/vnd.ollama.image.<this>`).
      * Human-readable, and deliberately not what makes the synthesized path collision-proof on its
      * own - see the comment where this is combined with a digest, at the call site in [manifest].
+     *
+     * Also stripped after the last '/': `substringAfterLast('.')` returns its input unchanged when
+     * there is no '.', and every mediaType so far observed has one, but `mediaType` is server data,
+     * not a closed enum - a hypothetical dot-free one (`application/octet-stream`) would otherwise
+     * carry its own '/' straight into [RemoteFile.path] as an unintended nested directory. Not a
+     * traversal either way - `RepoDownloader.resolveInside` still holds - just not a shape this
+     * adapter should manufacture a subdirectory from by accident.
      */
-    private fun layerSuffix(mediaType: String): String = mediaType.substringAfterLast('.')
+    private fun layerSuffix(mediaType: String): String =
+        mediaType.substringAfterLast('.').substringAfterLast('/')
 
     /**
      * [repoId] split into a name and a tag: everything before the last ':' and everything after it.
@@ -244,6 +272,9 @@ class Ollama(
     private companion object {
         const val SHA256_PREFIX = "sha256:"
         const val MANIFEST_ACCEPT = "application/vnd.docker.distribution.manifest.v2+json"
+
+        /** "sha256:" plus exactly 64 lowercase hex characters - a real SHA-256, not just the prefix. */
+        val SHA256_DIGEST = Regex("sha256:[0-9a-f]{64}")
 
         /**
          * ignoreUnknownKeys is load-bearing, not hygiene, exactly as in HuggingFace/ModelScope:

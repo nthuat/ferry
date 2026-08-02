@@ -18,44 +18,72 @@ class OllamaTest {
 
     /**
      * Shaped exactly like the live response: a config blob alongside four layers, each carrying
-     * nothing but mediaType/size/digest - no filename anywhere. Digests are the verified-live
-     * prefixes, used as-is (this code never checks digest length or hex-ness beyond the "sha256:"
-     * prefix, so a shortened one exercises the parser identically to a real 64-hex-char one).
+     * nothing but mediaType/size/digest - no filename anywhere. Digests are real (but arbitrary)
+     * SHA-256 values, 64 lowercase hex characters, matching what Ollama.manifest now requires.
      */
     private val basicManifestJson = """
         { "schemaVersion": 2, "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
           "config": { "mediaType": "application/vnd.docker.container.image.v1+json", "size": 490,
-                       "digest": "sha256:configdigest00" },
+                       "digest": "sha256:a547ede7297270a575049cbc4c9267378b77adac5287396d9754a294f2a0d86e" },
           "layers": [
             { "mediaType": "application/vnd.ollama.image.model", "size": 397807936,
-              "digest": "sha256:c5396e06af" },
+              "digest": "sha256:0ee70bd579839c5691f0ed80505934ecc07f8894cd5322fe0ecc2ea4a5a3b469" },
             { "mediaType": "application/vnd.ollama.image.system", "size": 68,
-              "digest": "sha256:66b9ea09bd" },
+              "digest": "sha256:889b19303e4bb733f80c1942dc750396ede241118913efac28b88478d0b3f38d" },
             { "mediaType": "application/vnd.ollama.image.template", "size": 1482,
-              "digest": "sha256:eb4402837c" },
+              "digest": "sha256:a6dcd10d5555d85a45fec20f302760b9ecb478ceca43af8a9747652204d4cd28" },
             { "mediaType": "application/vnd.ollama.image.license", "size": 11343,
-              "digest": "sha256:832dd9e00a" }
+              "digest": "sha256:d2a0ed60ae6e544e2bd046a702276e6a628183243e81db30581981d44719bd2f" }
           ] }
     """.trimIndent()
 
     /**
      * llama3.2-vision:11b's real shape, verified live: five layers, and two of them - both
-     * "image.license" - share a mediaType. Naming a file by mediaType suffix alone collides here;
-     * this fixture is what a naive suffix-only implementation must fail against (see the
-     * distinct-paths and total-bytes tests below), and what this adapter must keep passing forever.
+     * "image.license" - share a mediaType (but not a digest). Naming a file by mediaType suffix
+     * alone collides here; this fixture is what a naive suffix-only implementation must fail
+     * against (see the distinct-paths and total-bytes tests below), and what this adapter must keep
+     * passing forever.
      */
     private val visionCollisionJson = """
         { "schemaVersion": 2, "layers": [
             { "mediaType": "application/vnd.ollama.image.model", "size": 6433703168,
-              "digest": "sha256:aaaa1111" },
+              "digest": "sha256:97e9d4a64e65dca698a4d49ec78a9cf8d6f397310d823338267e5921071a26be" },
             { "mediaType": "application/vnd.ollama.image.template", "size": 1565,
-              "digest": "sha256:bbbb2222" },
+              "digest": "sha256:103a38cdb19f1b687ea4bfcf78a4c2a596af884727b1c4401e972a0d53d250a4" },
             { "mediaType": "application/vnd.ollama.image.license", "size": 6021,
-              "digest": "sha256:cccc3333" },
+              "digest": "sha256:0b05627c0bef591a71788ba49f598908ec344c2c8bf033e0bb6664723e5e66f9" },
             { "mediaType": "application/vnd.ollama.image.license", "size": 7680,
-              "digest": "sha256:dddd4444" },
+              "digest": "sha256:f5043a7d9bf4e6e8eb685cfa363f98ce099799d64ee8acbe2b63dafd642f0669" },
             { "mediaType": "application/vnd.ollama.image.params", "size": 59,
-              "digest": "sha256:eeee5555" }
+              "digest": "sha256:ad226d5d91591cc0db6f55d11bb3d36d8dd0295900df5ce2abe7f2abcdf014ff" }
+          ] }
+    """.trimIndent()
+
+    /**
+     * Two layers that share both mediaType and digest - the same content, listed twice, not two
+     * distinct files. `files` is built by mapping every layer unconditionally, so without dedup this
+     * would count 5_000_000 bytes twice.
+     */
+    private val exactDuplicateLayerJson = """
+        { "layers": [
+            { "mediaType": "application/vnd.ollama.image.model", "size": 5000000,
+              "digest": "sha256:0ee70bd579839c5691f0ed80505934ecc07f8894cd5322fe0ecc2ea4a5a3b469" },
+            { "mediaType": "application/vnd.ollama.image.model", "size": 5000000,
+              "digest": "sha256:0ee70bd579839c5691f0ed80505934ecc07f8894cd5322fe0ecc2ea4a5a3b469" }
+          ] }
+    """.trimIndent()
+
+    /**
+     * An empty "system" prompt and an empty "params" file hash identically - both the well-known
+     * SHA-256 of the empty string - despite being two different, real files. Dedup keyed on digest
+     * instead of path would wrongly collapse these into one.
+     */
+    private val sameDigestDifferentSuffixJson = """
+        { "layers": [
+            { "mediaType": "application/vnd.ollama.image.system", "size": 0,
+              "digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" },
+            { "mediaType": "application/vnd.ollama.image.params", "size": 0,
+              "digest": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" }
           ] }
     """.trimIndent()
 
@@ -76,8 +104,14 @@ class OllamaTest {
 
         val manifest = runBlocking { repo.manifest("qwen2.5:0.5b") }.getOrThrow()
 
-        assertEquals("c5396e06af", manifest.files.single { it.path == "model-c5396e06af" }.sha256)
-        assertEquals("832dd9e00a", manifest.files.single { it.path == "license-832dd9e00a" }.sha256)
+        assertEquals(
+            "0ee70bd579839c5691f0ed80505934ecc07f8894cd5322fe0ecc2ea4a5a3b469",
+            manifest.files.single { it.path.startsWith("model-") }.sha256,
+        )
+        assertEquals(
+            "d2a0ed60ae6e544e2bd046a702276e6a628183243e81db30581981d44719bd2f",
+            manifest.files.single { it.path.startsWith("license-") }.sha256,
+        )
     }
 
     @Test
@@ -86,8 +120,8 @@ class OllamaTest {
 
         val manifest = runBlocking { repo.manifest("qwen2.5:0.5b") }.getOrThrow()
 
-        assertEquals(397807936L, manifest.files.single { it.path == "model-c5396e06af" }.sizeBytes)
-        assertEquals(11343L, manifest.files.single { it.path == "license-832dd9e00a" }.sizeBytes)
+        assertEquals(397807936L, manifest.files.single { it.path.startsWith("model-") }.sizeBytes)
+        assertEquals(11343L, manifest.files.single { it.path.startsWith("license-") }.sizeBytes)
     }
 
     @Test
@@ -111,7 +145,11 @@ class OllamaTest {
         val manifest = runBlocking { repo.manifest("qwen2.5:0.5b") }.getOrThrow()
 
         assertEquals(4, manifest.files.size)
-        assertTrue(manifest.files.none { it.sha256 == "configdigest00" })
+        assertTrue(
+            manifest.files.none {
+                it.sha256 == "a547ede7297270a575049cbc4c9267378b77adac5287396d9754a294f2a0d86e"
+            },
+        )
     }
 
     @Test
@@ -119,20 +157,23 @@ class OllamaTest {
         server.enqueue(MockResponse().setBody(basicManifestJson))
 
         val manifest = runBlocking { repo.manifest("qwen2.5:0.5b") }.getOrThrow()
-        val model = manifest.files.single { it.path == "model-c5396e06af" }
+        val model = manifest.files.single { it.path.startsWith("model-") }
 
         assertEquals(
-            listOf("v2", "library", "qwen2.5", "blobs", "sha256:c5396e06af"),
+            listOf(
+                "v2", "library", "qwen2.5", "blobs",
+                "sha256:0ee70bd579839c5691f0ed80505934ecc07f8894cd5322fe0ecc2ea4a5a3b469",
+            ),
             model.url.toHttpUrl().pathSegments,
         )
     }
 
     /**
      * The whole reason this adapter is interesting: llama3.2-vision:11b's two "image.license"
-     * layers must not collapse onto one path. Collision-proof by construction (see [Ollama.manifest]
-     * KDoc), not by detecting the collision and bolting on a suffix - reverting the digest suffix
-     * back to a bare mediaType suffix (`path = layerSuffix(layer.mediaType)`) makes this go red:
-     * confirmed by hand against this exact fixture before committing.
+     * layers must not collapse onto one path. Two different digests here, so distinctBy in
+     * [Ollama.manifest] keeps both - reverting the digest suffix back to a bare mediaType suffix
+     * (`path = layerSuffix(layer.mediaType)`) makes this go red: confirmed by hand against this
+     * exact fixture before committing.
      */
     @Test
     fun `two layers of the same mediaType produce distinct paths, not a collision`() {
@@ -144,11 +185,11 @@ class OllamaTest {
         assertEquals(5, manifest.files.map { it.path }.distinct().size)
         assertEquals(
             listOf(
-                "model-aaaa1111",
-                "template-bbbb2222",
-                "license-cccc3333",
-                "license-dddd4444",
-                "params-eeee5555",
+                "model-97e9d4a64e65dca698a4d49ec78a9cf8d6f397310d823338267e5921071a26be",
+                "template-103a38cdb19f1b687ea4bfcf78a4c2a596af884727b1c4401e972a0d53d250a4",
+                "license-0b05627c0bef591a71788ba49f598908ec344c2c8bf033e0bb6664723e5e66f9",
+                "license-f5043a7d9bf4e6e8eb685cfa363f98ce099799d64ee8acbe2b63dafd642f0669",
+                "params-ad226d5d91591cc0db6f55d11bb3d36d8dd0295900df5ce2abe7f2abcdf014ff",
             ),
             manifest.files.map { it.path },
         )
@@ -162,6 +203,46 @@ class OllamaTest {
         val manifest = runBlocking { repo.manifest("llama3.2-vision:11b") }.getOrThrow()
 
         assertEquals(6433703168L + 1565L + 6021L + 7680L + 59L, manifest.totalBytes)
+    }
+
+    /**
+     * The other edge the suffix+digest scheme has to get right: two layers sharing *both* suffix
+     * and digest are the same content listed twice, not two files. Every layer is mapped
+     * unconditionally in [Ollama.manifest], so without `distinctBy { it.path }` this would produce
+     * two RemoteFiles at an identical path and double-count the bytes.
+     *
+     * Revert-checked: removing `.distinctBy { it.path }` makes this fail (2 files, 10_000_000 total)
+     * before restoring it.
+     */
+    @Test
+    fun `two layers with identical mediaType and digest dedupe to one file, not double counted`() {
+        server.enqueue(MockResponse().setBody(exactDuplicateLayerJson))
+
+        val manifest = runBlocking { repo.manifest("dup:latest") }.getOrThrow()
+
+        assertEquals(1, manifest.files.size)
+        assertEquals(5000000L, manifest.totalBytes)
+    }
+
+    /**
+     * The dedup above must be keyed on path (suffix + digest together), not on digest alone: two
+     * different suffixes can legitimately share a digest - an empty "system" prompt and an empty
+     * "params" file both hash to the empty-string SHA-256 - and are two real, distinct files.
+     */
+    @Test
+    fun `two layers with the same digest but different mediaType stay two distinct files`() {
+        server.enqueue(MockResponse().setBody(sameDigestDifferentSuffixJson))
+
+        val manifest = runBlocking { repo.manifest("shared-digest:latest") }.getOrThrow()
+
+        assertEquals(2, manifest.files.size)
+        assertEquals(
+            listOf(
+                "system-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "params-e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            manifest.files.map { it.path },
+        )
     }
 
     @Test
@@ -221,6 +302,38 @@ class OllamaTest {
         assertEquals(0, server.requestCount)
     }
 
+    /**
+     * The regression HuggingFace and ModelScope each closed once (docs/known-limitations.md):
+     * `requireWithinNamespace` must assert against a namespace computed off `base`, not a bare
+     * constant, or a self-hosted/mirrored registry at a non-root path fails every legitimate call.
+     * `registryNamespace` already computes off `base` - this is the test that would have caught it
+     * if it hadn't.
+     */
+    @Test
+    fun `a legitimate id succeeds against a path-carrying baseUrl`() {
+        val mirror = Ollama(OkHttpClient(), baseUrl = server.url("/hf").toString().trimEnd('/'))
+        server.enqueue(MockResponse().setBody(basicManifestJson))
+
+        val result = runBlocking { mirror.manifest("qwen2.5:0.5b") }
+
+        assertTrue(result.isSuccess)
+        assertEquals(
+            "/hf/v2/library/qwen2.5/manifests/0.5b",
+            server.takeRequest().path,
+        )
+    }
+
+    /** The namespace check must still catch an actual escape when baseUrl itself carries a path. */
+    @Test
+    fun `a repo id that traverses out of the registry namespace is still refused against a path-carrying baseUrl`() {
+        val mirror = Ollama(OkHttpClient(), baseUrl = server.url("/hf").toString().trimEnd('/'))
+
+        val result = runBlocking { mirror.manifest("../../etc/passwd") }
+
+        assertTrue(result.isFailure)
+        assertEquals(0, server.requestCount)
+    }
+
     @Test
     fun `an http error is returned as a failure`() {
         server.enqueue(MockResponse().setResponseCode(404))
@@ -273,6 +386,26 @@ class OllamaTest {
                 """{ "layers": [
                     { "mediaType": "application/vnd.ollama.image.model", "size": 5,
                       "digest": "sha512:deadbeef" }
+                ] }""",
+            ),
+        )
+
+        val result = runBlocking { repo.manifest("weird:latest") }
+
+        assertTrue(result.isFailure)
+    }
+
+    /**
+     * The "sha256:" prefix alone isn't sufficient - the remainder must actually be 64 lowercase hex
+     * characters, or it lands unvalidated in RemoteFile.path and RemoteFile.sha256 both.
+     */
+    @Test
+    fun `a layer digest with the sha256 prefix but malformed hex fails the manifest`() {
+        server.enqueue(
+            MockResponse().setBody(
+                """{ "layers": [
+                    { "mediaType": "application/vnd.ollama.image.model", "size": 5,
+                      "digest": "sha256:not-valid-hex" }
                 ] }""",
             ),
         )

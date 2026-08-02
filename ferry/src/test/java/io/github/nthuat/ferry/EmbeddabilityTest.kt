@@ -39,7 +39,7 @@ class EmbeddabilityTest {
     private val ollamaManifestJson = """
         { "schemaVersion": 2, "layers": [
           { "mediaType": "application/vnd.ollama.image.model", "size": ${configBody.length},
-            "digest": "sha256:abc123" }
+            "digest": "sha256:8e28eec6e1be158f6ddd03b882aed149db322f3e0824e3dd4c1e860601990a4b" }
         ] }
     """.trimIndent()
 
