@@ -24,6 +24,33 @@ ferry.download("google/gemma-2-2b-it", context.filesDir) { progress ->
 }
 ```
 
+Three hubs, same call:
+
+```kotlin
+Ferry.huggingFace().download("google/gemma-2-2b-it", dir)
+Ferry.modelScope().download("Qwen/Qwen2.5-0.5B-Instruct", dir)
+Ferry.ollama().download("qwen2.5:0.5b", dir)
+```
+
+Each takes an `OkHttpClient` if you have one — and if you do, pass it: every request Ferry makes
+then travels through your interceptors, your timeouts and your proxy config rather than a second
+client it built behind your back.
+
+## Getting it
+
+Not on Maven Central. `dev.thuat` would need `thuat.dev` to be a domain this project owns, and it
+is not one, so publishing is a decision rather than a formality.
+
+Until then, a composite build is the way to depend on it without vendoring a copy:
+
+```kotlin
+// settings.gradle.kts
+includeBuild("../ferry")
+```
+
+Or clone it and `include(":ferry")` directly. `:ferry-work` is optional and additive — take it only
+if you want WorkManager (see [Backgrounding](#backgrounding-ferry-work)).
+
 ## Why this exists
 
 Two of the most prominent on-device-LLM Android apps wrote the same downloader independently:
@@ -270,6 +297,34 @@ include(":ferry-work")
 // app/build.gradle.kts
 implementation(project(":ferry-work"))
 ```
+
+Your notification, your channel, your wording — registered once, via WorkManager's own factory hook:
+
+```kotlin
+class App : Application(), Configuration.Provider {
+    override val workManagerConfiguration = Configuration.Builder()
+        .setWorkerFactory(
+            RepoDownloadWorkerFactory { repoId, progress ->
+                // progress is null before the first update arrives
+                buildNotification(repoId, progress)
+            },
+        )
+        .build()
+}
+```
+
+Then enqueue:
+
+```kotlin
+WorkManager.getInstance(context)
+    .enqueueRepoDownload(repoId = "google/gemma-2-2b-it", into = filesDir, notificationId = 42)
+```
+
+Ferry moves bytes; it never decides what your users read while it does.
+
+Enqueueing the same repo id twice is a no-op rather than a race — the second call keeps the running
+work instead of replacing it, because replacing would cancel a download whose `finally` then deletes
+the staging directory the replacement is about to write into.
 
 ### Why a separate module, not a feature of `:ferry`
 
