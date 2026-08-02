@@ -121,6 +121,69 @@ class RepoDownloaderTest {
         assertEquals(6_000L, report.shortfallBytes)
     }
 
+    /**
+     * A device with room to finish must not be told it has no room to start. The more progress a
+     * resumable download has made, the more this matters — and the more likely a naive check is to
+     * refuse it.
+     */
+    @Test
+    fun `a mostly staged download only needs the remaining bytes`() {
+        val body = "0123456789"
+        File(temp.root, ".staging/a/b/model.bin.part").apply {
+            parentFile?.mkdirs()
+            writeText(body.take(8))
+        }
+        File(temp.root, ".staging/a/b/model.bin.validator").writeText("\"v1\"")
+        val files = listOf(remote("model.bin", body.length.toLong(), shaOf(body)))
+        server.enqueue(
+            MockResponse().setResponseCode(206).setBody(body.drop(8))
+                .addHeader("Content-Range", "bytes 8-9/10"),
+        )
+
+        // Room for the two remaining bytes, nowhere near room for all ten.
+        val downloader = RepoDownloader(
+            repo = fakeRepo(files),
+            downloader = ResumableDownloader(OkHttpClient()),
+            spaceCheck = SpaceCheck(probe = { 4 }, headroomBytes = 0L),
+        )
+
+        val result = runBlocking { downloader.download("a/b", temp.root) }
+
+        assertTrue("8 of 10 bytes are already on disk", result.isSuccess)
+    }
+
+    /**
+     * `ResumableDownloader` renames `.part` onto the final name as soon as the *server's* declared
+     * length is satisfied — before anything is compared to the manifest — so a complete-looking file
+     * can still be one the manifest rejects. Crediting it anyway would under-reserve for bytes that
+     * are about to be re-downloaded in full, which is the unsafe direction of error: over-reserving
+     * only refuses a download that would have fit, under-reserving starts one that fills the disk.
+     */
+    @Test
+    fun `a complete-looking staged file that fails the manifest's declared size is not credited`() {
+        val body = "0123456789"
+        File(temp.root, ".staging/a/b/model.bin").apply {
+            parentFile?.mkdirs()
+            // Complete by the server's own (stale) reckoning, but short of what this manifest declares.
+            writeText(body.take(6))
+        }
+        val files = listOf(remote("model.bin", body.length.toLong(), shaOf(body)))
+
+        // Room for the last four bytes only — sufficient if, and only if, the stale six are wrongly
+        // credited.
+        val downloader = RepoDownloader(
+            repo = fakeRepo(files),
+            downloader = ResumableDownloader(OkHttpClient()),
+            spaceCheck = SpaceCheck(probe = { 4 }, headroomBytes = 0L),
+        )
+
+        val result = runBlocking { downloader.download("a/b", temp.root) }
+
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull() is InsufficientSpaceException)
+        assertEquals("an uncredited refusal must still spend no network request", 0, server.requestCount)
+    }
+
     @Test
     fun `a file failing verification fails the whole repo`() {
         val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf("SOMETHING ELSE")))

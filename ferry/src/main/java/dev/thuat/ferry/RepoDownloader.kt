@@ -201,8 +201,14 @@ class RepoDownloader(
             // job (see DefaultFreeSpaceProbe's doc in SpaceCheck.kt), not this call site's: fixing it
             // here would only protect callers who go through RepoDownloader, and SpaceCheck is public,
             // usable directly for a preflight check without ever calling download() at all.
+            //
+            // manifest.creditingStaged(stagingDir), not manifest itself: a download staged 90%
+            // already needs only the remaining 10%, and reserving the full total tells a device with
+            // room to finish it has no room to start — worse the more progress a resume has made,
+            // which is exactly backwards. See creditingStaged's own doc for what is and is not
+            // credited. SpaceCheck itself is unchanged; only the manifest it is asked about differs.
             onProgress(RepoProgress.CheckingSpace(repoId))
-            val report = spaceCheck.check(manifest, into)
+            val report = spaceCheck.check(manifest.creditingStaged(stagingDir), into)
             if (!report.sufficient) {
                 return@withContext Result.failure(InsufficientSpaceException(report))
             }
@@ -396,20 +402,79 @@ class RepoDownloader(
      *
      * Deliberately re-hashes rather than trusting a marker file: a marker records what was true
      * once, and the point of the check is what is true now.
-     *
-     * `onDisk.length() == remote.sizeBytes` is unconditional — including when `remote.sizeBytes` is
-     * 0 — and always has been. The post-download check in `download()` above now matches it exactly,
-     * for the same reason: the two used to disagree (that check skipped entirely on a declared 0),
-     * which let a hub declaring an explicit zero pass a non-empty body on download and then fail
-     * this check on every later call forever. A declared 0 is treated as a real, checked assertion
-     * that the file is empty in both places now, not "unknown, don't check" in one and enforced in
-     * the other.
      */
-    private fun RepoManifest.isSatisfiedBy(dir: File): Boolean = files.all { remote ->
-        val onDisk = resolveInside(dir, remote.path)
-        onDisk.isFile &&
-            onDisk.length() == remote.sizeBytes &&
-            (remote.sha256 == null || Sha256.matches(onDisk, remote.sha256))
+    private fun RepoManifest.isSatisfiedBy(dir: File): Boolean = files.all { it.isSatisfiedIn(dir) }
+
+    /**
+     * Whether [dir] already holds this one file at the right size, with the right hash where one was
+     * published.
+     *
+     * `onDisk.length() == sizeBytes` is unconditional — including when `sizeBytes` is 0 — and always
+     * has been. The post-download check in `download()` above now matches it exactly, for the same
+     * reason: the two used to disagree (that check skipped entirely on a declared 0), which let a hub
+     * declaring an explicit zero pass a non-empty body on download and then fail this check on every
+     * later call forever. A declared 0 is treated as a real, checked assertion that the file is empty
+     * in both places now, not "unknown, don't check" in one and enforced in the other.
+     *
+     * One predicate behind two questions: [isSatisfiedBy] applies it to every file to decide a
+     * whole-repo cache hit against the *committed* directory; [remainingBytes] below applies it to one
+     * file to decide whether a *staged* copy — sitting under its final name in `.staging`, not yet
+     * committed — is safe to credit in the space check. Both need the same answer to "is this file
+     * actually done", so it exists once rather than as two versions that could quietly drift apart.
+     */
+    private fun RemoteFile.isSatisfiedIn(dir: File): Boolean {
+        val onDisk = resolveInside(dir, path)
+        return onDisk.isFile &&
+            onDisk.length() == sizeBytes &&
+            (sha256 == null || Sha256.matches(onDisk, sha256))
+    }
+
+    /**
+     * [manifest] as the space check should see it: each file's size reduced by whatever of it is
+     * already staged and safe to reuse, so a mostly-resumed download does not reserve bytes that are
+     * already on disk.
+     *
+     * Scoped to this one call site — [SpaceCheck.check] is the only consumer. Everywhere else in
+     * [download] (the transfer loop, per-file verification, [pruneOrphans]) uses the real [manifest],
+     * because those need the actual declared size, not this reduced stand-in.
+     */
+    private fun RepoManifest.creditingStaged(stagingDir: File): RepoManifest =
+        copy(files = files.map { it.copy(sizeBytes = it.remainingBytes(stagingDir)) })
+
+    /**
+     * Bytes of this file still needed from the network, after crediting whatever [stagingDir] already
+     * holds for it.
+     *
+     * Staging can hold this file in three shapes (see the plan's "What staging actually contains").
+     * Only two are credited:
+     *
+     * - **A bare file under its final name** is credited in full, but only when [isSatisfiedIn]
+     *   agrees — reused rather than trusting presence alone. `ResumableDownloader` renames `.part`
+     *   onto the final name as soon as the *server's* declared length is met, before anything is
+     *   compared to the manifest, so a complete-looking file can still be one the manifest rejects.
+     *   Crediting it anyway would under-reserve for bytes about to be re-downloaded in full — the
+     *   unsafe direction of error — so an unsatisfied bare file counts as no progress, not partial
+     *   progress.
+     * - **A `.part` with a `.validator`** is credited for the bytes already on disk:
+     *   `ResumableDownloader` resumes from exactly `haveBytes` when a validator is present, so that
+     *   many bytes are genuinely not fetched again.
+     * - **A `.part` alone** is not credited. No validator means `ResumableDownloader` refuses to
+     *   resume blind and restarts from zero, so those bytes are not reusable either.
+     *
+     * Clamped at zero rather than allowed to go negative: a `.part` larger than this manifest's
+     * current declared size — stale scratch from a revision that has since shrunk the file; pruning
+     * only discards a path the manifest no longer names at all, not a still-named path whose
+     * declaration changed — must not manufacture a negative requirement that silently subsidises some
+     * other file's.
+     */
+    private fun RemoteFile.remainingBytes(stagingDir: File): Long {
+        if (isSatisfiedIn(stagingDir)) return 0L
+
+        val staged = resolveInside(stagingDir, path)
+        val part = File(staged.parentFile, "${staged.name}.part")
+        val validator = File(staged.parentFile, "${staged.name}.validator")
+        val resumableBytes = if (part.isFile && validator.isFile) part.length() else 0L
+        return maxOf(0L, sizeBytes - resumableBytes)
     }
 
     /**
