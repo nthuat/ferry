@@ -57,6 +57,13 @@ class ProgressMappingTest {
     }
 
     @Test
+    fun `skipped maps to the verifying state, carrying the file path`() {
+        val progress = RepoProgress.Skipped("owner/model", "config.json", fileIndex = 0, fileCount = 2)
+
+        assertEquals(DownloadState.Verifying("config.json"), progress.toDownloadState(sawTransfer = false))
+    }
+
+    @Test
     fun `complete after a real transfer is not a cache hit`() {
         val progress = RepoProgress.Complete("owner/model", File("/tmp/owner/model"))
 

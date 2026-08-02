@@ -20,6 +20,24 @@ sealed interface RepoProgress {
         val fileBytes: Long,
     ) : RepoProgress
 
+    /**
+     * [path] was already staged under its final name, matching the manifest's declared size and
+     * hash where one is published — so nothing was requested for it.
+     *
+     * Fires once, taking the place of the [Downloading]/[Verifying] pair a real fetch would have
+     * produced. Without a distinct case for this, a caller watching [fileIndex] advance across
+     * [fileCount] files would see some indices simply missing from the [Downloading] stream, with
+     * no event to say why — indistinguishable from a caller that just missed them. A staged file
+     * whose bytes do *not* match the manifest is not this case: it is fetched like any other miss,
+     * and reports [Downloading]/[Verifying] normally.
+     */
+    data class Skipped(
+        val repoId: String,
+        val path: String,
+        val fileIndex: Int,
+        val fileCount: Int,
+    ) : RepoProgress
+
     data class Verifying(val repoId: String, val path: String) : RepoProgress
 
     data class Complete(val repoId: String, val dir: File) : RepoProgress
@@ -224,6 +242,21 @@ class RepoDownloader(
                 // remote.path comes from the hub's manifest over the network — untrusted the same
                 // way repoId is. Without this, a hostile listing could write anywhere on disk.
                 val destination = resolveInside(stagingDir, remote.path)
+
+                // Reuses isSatisfiedIn — the same per-file predicate isSatisfiedBy (whole-repo
+                // cache hit) and remainingBytes (space credit) already apply, not a fresh "looks
+                // done" check of its own. A bare destination.exists() would count a staged file as
+                // done because a file happens to sit at that path, committing whatever bytes are
+                // actually there unread — the drift between "counted as progress" and "skipped"
+                // that this file's own history (docs/known-limitations.md) warns is how a repo
+                // ends up committed and then failing its own cache check forever. isSatisfiedIn
+                // re-hashes, so a staged file that merely exists but does not match still falls
+                // through to an ordinary fetch below.
+                if (remote.isSatisfiedIn(stagingDir)) {
+                    onProgress(RepoProgress.Skipped(repoId, remote.path, index, manifest.files.size))
+                    return@forEachIndexed
+                }
+
                 destination.parentFile?.mkdirs()
 
                 downloader.download(
@@ -416,11 +449,13 @@ class RepoDownloader(
      * later call forever. A declared 0 is treated as a real, checked assertion that the file is empty
      * in both places now, not "unknown, don't check" in one and enforced in the other.
      *
-     * One predicate behind two questions: [isSatisfiedBy] applies it to every file to decide a
+     * One predicate behind three questions now: [isSatisfiedBy] applies it to every file to decide a
      * whole-repo cache hit against the *committed* directory; [remainingBytes] below applies it to one
      * file to decide whether a *staged* copy — sitting under its final name in `.staging`, not yet
-     * committed — is safe to credit in the space check. Both need the same answer to "is this file
-     * actually done", so it exists once rather than as two versions that could quietly drift apart.
+     * committed — is safe to credit in the space check; and [download]'s own loop applies it to that
+     * same staged copy to decide whether the file needs a request at all. All three need the same
+     * answer to "is this file actually done", so it exists once rather than as multiple versions that
+     * could quietly drift apart.
      */
     private fun RemoteFile.isSatisfiedIn(dir: File): Boolean {
         val onDisk = resolveInside(dir, path)

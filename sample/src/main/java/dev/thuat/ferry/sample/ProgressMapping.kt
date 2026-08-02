@@ -32,6 +32,12 @@ fun RepoProgress.toDownloadState(sawTransfer: Boolean, lastFileCount: Int? = nul
 
     is RepoProgress.Verifying -> DownloadState.Verifying(path)
 
+    // No dedicated row state for "already had it" — DownloadState.Verifying is the closest honest
+    // fit: a brief, non-transferring check on one file, the same shape RepoProgress.Skipped itself
+    // is. Add a dedicated DownloadState only if a row ever needs to say "skipped" rather than
+    // "checked".
+    is RepoProgress.Skipped -> DownloadState.Verifying(path)
+
     is RepoProgress.Complete -> DownloadState.Downloaded(
         cacheHit = !sawTransfer,
         fileCount = if (sawTransfer) lastFileCount else null,

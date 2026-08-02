@@ -1058,6 +1058,83 @@ class RepoDownloaderTest {
         )
     }
 
+    /**
+     * Task 4b: the download loop called `download` for every file in the manifest unconditionally,
+     * even one already sitting in staging, correct, under its final name — the gap Task 4's own
+     * space credit exposed (crediting a staged file toward the space check while still re-fetching
+     * it is incoherent). Only model.bin's response is queued; config.json must be satisfied from
+     * staging alone. Asserted on server.requestCount, not only on success — the whole claim is that
+     * bytes did not move for the file already staged.
+     */
+    @Test
+    fun `a staged file that already satisfies the manifest is not re-fetched`() {
+        File(temp.root, ".staging/a/b/config.json").apply {
+            parentFile?.mkdirs()
+            writeText(configBody)
+        }
+        val files = listOf(
+            remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)),
+            remote("config.json", configBody.length.toLong(), shaOf(configBody)),
+        )
+        server.enqueue(MockResponse().setBody(weightsBody))
+
+        val result = runBlocking { downloaderFor(files).download("a/b", temp.root) }
+
+        assertTrue(result.isSuccess)
+        assertEquals("the staged file must not be re-fetched", 1, server.requestCount)
+    }
+
+    /**
+     * The shape RepoProgress.Skipped exists for: a caller watching fileIndex advance must see why
+     * config.json's index never appears in a Downloading event, rather than an unexplained gap.
+     */
+    @Test
+    fun `a skipped file reports Skipped instead of Downloading`() {
+        File(temp.root, ".staging/a/b/config.json").apply {
+            parentFile?.mkdirs()
+            writeText(configBody)
+        }
+        val files = listOf(
+            remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)),
+            remote("config.json", configBody.length.toLong(), shaOf(configBody)),
+        )
+        server.enqueue(MockResponse().setBody(weightsBody))
+
+        val seen = mutableListOf<RepoProgress>()
+        runBlocking { downloaderFor(files).download("a/b", temp.root) { seen += it } }
+
+        val skipped = seen.filterIsInstance<RepoProgress.Skipped>().single()
+        assertEquals("config.json", skipped.path)
+        assertEquals(2, skipped.fileCount)
+        assertTrue(
+            "a skipped file must never also report Downloading — no bytes moved for it",
+            seen.none { it is RepoProgress.Downloading && it.path == "config.json" },
+        )
+    }
+
+    /**
+     * Task 4b's own load-bearing guard: skipping must key off correctness, not mere presence. A
+     * staged file whose bytes are wrong must still be fetched — skipping on existence alone would
+     * commit a corrupt file, which is guarantee 2 (README's guarantee table: "never a corrupt
+     * model"). Revert-checked: with the predicate weakened to a bare `destination.exists()`, this
+     * test fails (0 requests, and the corrupt bytes ride straight into the committed repo) — see
+     * task-4b-report.md for the observed failure.
+     */
+    @Test
+    fun `a staged file whose bytes do not match the manifest is still fetched`() {
+        File(temp.root, ".staging/a/b/model.bin").apply {
+            parentFile?.mkdirs()
+            writeText("wrong bytes, wrong length, staged under the right name")
+        }
+        val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
+        server.enqueue(MockResponse().setBody(weightsBody))
+
+        val dir = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+
+        assertEquals("a corrupt staged file must be fetched, not skipped", 1, server.requestCount)
+        assertEquals(weightsBody, File(dir, "model.bin").readText())
+    }
+
     @Test
     fun `abandon removes only this repo's staging`() {
         val mine = File(temp.root, ".staging/a/b/model.bin.part").apply {
