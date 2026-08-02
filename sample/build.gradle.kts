@@ -7,11 +7,11 @@ plugins {
 }
 
 android {
-    namespace = "io.github.nthuat.ferry.sample"
+    namespace = "dev.thuat.ferry.sample"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "io.github.nthuat.ferry.sample"
+        applicationId = "dev.thuat.ferry.sample"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
