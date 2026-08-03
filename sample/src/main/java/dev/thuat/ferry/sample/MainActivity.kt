@@ -30,6 +30,7 @@ class MainActivity : ComponentActivity() {
                         state = state,
                         onDownload = viewModel::download,
                         onRecheck = viewModel::recheck,
+                        onDiscard = viewModel::discard,
                         onToggleLowDisk = viewModel::setLowDiskSimulation,
                         onCorruptFile = viewModel::corruptADownloadedFile,
                     )

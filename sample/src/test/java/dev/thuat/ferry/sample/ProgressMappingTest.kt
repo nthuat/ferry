@@ -144,4 +144,43 @@ class ProgressMappingTest {
 
     /** A named class, deliberately: an anonymous one's `simpleName` is "", which would hide a blank fallback. */
     private class NoMessageException : IOException()
+
+    @Test
+    fun `an available row becomes interrupted once staged bytes are found`() {
+        val state = DownloadState.Available.withStagedBytes(2_400_000L)
+
+        assertEquals(DownloadState.Interrupted(2_400_000L), state)
+    }
+
+    @Test
+    fun `an available row with nothing staged stays available`() {
+        val state = DownloadState.Available.withStagedBytes(0L)
+
+        assertEquals(DownloadState.Available, state)
+    }
+
+    /**
+     * A row already downloading, downloaded, refused, or failed has more current information than a
+     * byte count staged before this attempt was even known about, and must not be clobbered by it —
+     * see `withStagedBytes`' own doc and `SampleViewModel`'s `init` block, which relies on exactly
+     * this to survive a race against a user tapping Download before the staged-bytes check resolves.
+     */
+    @Test
+    fun `a row that is not available is left untouched regardless of staged bytes`() {
+        val downloading = DownloadState.Downloading(
+            fileIndex = 0,
+            fileCount = 1,
+            path = "model.bin",
+            bytesWritten = 10L,
+            fileBytes = 100L,
+        )
+
+        val state = downloading.withStagedBytes(999L)
+
+        assertEquals(
+            "a live state must not be clobbered by a byte count staged before this attempt began",
+            downloading,
+            state,
+        )
+    }
 }

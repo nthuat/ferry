@@ -13,6 +13,21 @@ sealed interface DownloadState {
     data object Available : DownloadState
 
     /**
+     * Staging survived from an earlier attempt on this repo — a failure, a cancellation, or the
+     * process dying — holding [stagedBytes] this app found reusable via
+     * [dev.thuat.ferry.RepoDownloader.stagedBytes]. Computed once, when `SampleViewModel` is
+     * constructed (see its own doc), not continuously: nothing outside this app touches its staging,
+     * so there is nothing to watch for after that first check.
+     *
+     * [stagedBytes] is not re-verified here any more than `RepoDownloader.stagedBytes` re-verifies it
+     * itself (see that method's own KDoc) — it is a hint, not a promise. The caption this state
+     * renders says only what is staged, never what tapping Resume is guaranteed to transfer: a
+     * `.part` with no validator restarts from zero regardless of what this number says, and this row
+     * must not claim otherwise (see `captionFor`'s handling of this state).
+     */
+    data class Interrupted(val stagedBytes: Long) : DownloadState
+
+    /**
      * Free space is being checked — a fast, local stat (`File.usableSpace`), not network time: the
      * manifest has already been fetched by the time this ever fires. Skipped entirely on a cache
      * hit, which needs no space check at all — a `Downloaded` row can arrive with no `CheckingSpace`

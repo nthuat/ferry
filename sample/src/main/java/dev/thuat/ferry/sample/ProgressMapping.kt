@@ -45,6 +45,23 @@ fun RepoProgress.toDownloadState(sawTransfer: Boolean, lastFileCount: Int? = nul
 }
 
 /**
+ * What this row should show once [dev.thuat.ferry.RepoDownloader.stagedBytes] is known for it —
+ * applied once per row, when `SampleViewModel` first learns whatever staging survived a process
+ * death (see its own `init` doc).
+ *
+ * Only overrides [DownloadState.Available]: every other state carries more current information than
+ * a byte count staged before this attempt was even known about — a row already downloading,
+ * downloaded, refused, or failed must not be clobbered by it, including the case `SampleViewModel`'s
+ * own doc calls out — a user tapping Download before this check resolves.
+ */
+fun DownloadState.withStagedBytes(stagedBytes: Long): DownloadState =
+    if (this is DownloadState.Available && stagedBytes > 0L) {
+        DownloadState.Interrupted(stagedBytes)
+    } else {
+        this
+    }
+
+/**
  * Maps a failed download's [Throwable] to the state its row shows.
  *
  * [InsufficientSpaceException] becomes `WontFit`, carrying [dev.thuat.ferry.SpaceReport]'s
