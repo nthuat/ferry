@@ -1059,6 +1059,30 @@ class RepoDownloaderTest {
     }
 
     /**
+     * Branch review: `pruneOrphans` deleted an orphan file but never the directory pruning it left
+     * empty, so an orphaned subdirectory survived the file pass and rode `stagingDir.renameTo(target)`
+     * straight into the committed repo — indistinguishable from real content once there. The orphan
+     * here sits inside its own subdirectory rather than directly in staging, so pruning its file
+     * empties "gone/" and this asserts that directory does not survive into the commit either.
+     */
+    @Test
+    fun `pruneOrphans removes a directory it empties, not only the files inside it`() {
+        File(temp.root, ".staging/a/b.d/gone/gone.bin.part").apply {
+            parentFile?.mkdirs()
+            writeText("stale bytes under a subdirectory the manifest no longer names")
+        }
+        val files = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(configBody))
+
+        val dir = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+
+        assertFalse(
+            "a directory emptied by pruning must not ride the commit rename into the repo",
+            File(dir, "gone").exists(),
+        )
+    }
+
+    /**
      * Task 4b: the download loop called `download` for every file in the manifest unconditionally,
      * even one already sitting in staging, correct, under its final name — the gap Task 4's own
      * space credit exposed (crediting a staged file toward the space check while still re-fetching

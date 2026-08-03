@@ -642,7 +642,8 @@ class RepoDownloader(
     }
 
     /**
-     * Deletes every staged file under [stagingDir] that [manifest] no longer vouches for.
+     * Deletes every staged file under [stagingDir] that [manifest] no longer vouches for, and any
+     * directory that pruning those files leaves empty.
      *
      * Durable staging (kept since Task 1) means a file here can outlive the manifest that produced
      * it — the hub removed it, renamed it, or the caller is retrying against a different revision —
@@ -661,6 +662,16 @@ class RepoDownloader(
      * directory is exactly where a symlink would matter, and resolving through the same helper every
      * other path in this file trusts means this one does not need its own argument for why what it
      * found is safe to delete.
+     *
+     * The directory pass runs second, after every orphan file is already gone, and bottom-up rather
+     * than interleaved with the file pass: a directory is only safe to judge once nothing that might
+     * still be inside it is left to judge first. Deleting a directory nothing names is not optional
+     * tidiness — an orphaned subdirectory that survives this rides `stagingDir.renameTo(target)`
+     * straight into the committed repo on the very same rename that publishes the real files,
+     * indistinguishable from real content to anything reading it back afterward. `File.delete()` on
+     * a directory only succeeds when it is empty, so this is a no-op for every directory that still
+     * holds something legitimate — including one a file for *this* attempt has not been written into
+     * yet, which [download]'s own loop repopulates moments later regardless.
      *
      * A path still named in the manifest survives here untouched, even if the bytes staged under it
      * are no longer the size or hash the manifest currently declares. That is deliberate, not an
@@ -687,6 +698,12 @@ class RepoDownloader(
                 if (!vouchedFor) {
                     resolveInside(stagingDir, relativePath).delete()
                 }
+            }
+        stagingDir.walkBottomUp()
+            .filter { it.isDirectory && it != stagingDir }
+            .forEach { directory ->
+                val relativePath = directory.relativeTo(stagingDir).invariantSeparatorsPath
+                resolveInside(stagingDir, relativePath).delete()
             }
     }
 
