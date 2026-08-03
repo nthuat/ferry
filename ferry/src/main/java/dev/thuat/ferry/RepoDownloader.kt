@@ -141,10 +141,15 @@ class RepoDownloader(
      * Downloads [repoId] into a directory under [into] and returns it.
      *
      * **Not safe to call concurrently for the same [repoId] and [into].** Both calls stage into the
-     * same scratch directory, so the first to finish deletes the other's in-flight work, and a
-     * rename by one while the other still holds open file descriptors into it follows the inode
-     * into the committed repo — writing into a directory that has already been verified. Serialising
-     * calls per repo id is the caller's responsibility; different repo ids are independent.
+     * same scratch directory and write into it independently — interleaved writes to the same
+     * destination file are a corruption risk on their own. Whichever commits first renames staging
+     * onto `target`; if the other still holds open file descriptors into it, its writes follow the
+     * inode into what is now a committed repo. If the second call reaches its own commit afterward,
+     * `target`'s marker still names the same repo id, so the guard against replacing a directory
+     * this method did not write does not catch this either: the second call deletes the first's
+     * freshly committed repo and renames its own version over it. Serialising calls per repo id is
+     * the caller's responsibility; different repo ids are independent. See also [abandon]'s own KDoc
+     * for the same hazard between `abandon` and `download`.
      */
     suspend fun download(
         repoId: String,

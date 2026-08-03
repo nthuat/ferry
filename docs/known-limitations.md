@@ -86,21 +86,48 @@ default in each adapter's parsed entry type only lands on the `"directory"`/`"tr
 filtered out before becoming a `RemoteFile`), so this closes a real gap for a hub that starts
 publishing a genuine zero without changing behavior for either hub in production today.
 
-## Resume does not survive the process
+## Closed: resume did not survive the process
 
-`ResumableDownloader` recovers from a dropped connection within one attempt. `RepoDownloader` deletes
-its staging directory in a `finally`, so a failed attempt starts the next one from byte zero.
+Was: `ResumableDownloader` recovered from a dropped connection within one attempt, but `RepoDownloader`
+deleted its staging directory in a `finally`, so a failed attempt started the next one from byte zero.
+Deliberate at the time, not an oversight: deleting staging was what guaranteed no half-written repo
+survived a failure, and having both needs persisted state — noted then as a later phase, with the
+README's guarantee table scoped accordingly.
 
-This is a deliberate trade, not an oversight: deleting staging is what guarantees no half-written repo
-survives a failure. Having both needs persisted state and is a later phase. The README's guarantee
-table is scoped accordingly.
+**Closed by making staging durable instead of transactional, not by adding persistence.** The
+`finally` is gone; a failed attempt, a cancellation, or the process dying now all leave staging exactly
+as far as they got. That is safe for the same reason removing it was safe to attempt at all: staging
+was never inside the target directory the no-half-written-repo guarantee is about — it sits under
+`into/.staging`, a reader of `into` itself never sees it — so deleting it on failure was only ever
+protecting against a disk leak, not against corruption. `abandon(repoId, into)` now protects against
+that leak explicitly instead, called when the caller has decided no retry is coming, rather than
+automatically the moment one attempt fails and possibly ripping out bytes a retry would have reused.
+
+A later `download` call for the same repo id resumes from whatever staging holds: a `.part` with a
+validator resumes via `Range`; a bare file already staged under its final name is skipped entirely,
+not re-fetched, once re-verified against the manifest — presence alone is deliberately not trusted,
+since a bare file is only ever what the *server's* declared length was satisfied, before anything
+compared it to the manifest. `stagedBytes(repoId, into)` lets a caller detect there is something to
+resume before calling `download` at all. A manifest that no longer vouches for a staged path — the hub
+renamed or removed the file — has that stale scratch pruned before it can be mistaken for progress
+worth resuming.
+
+**Residual, not closed by this:** deliberate **pause** — stopping a download mid-flight and recording
+that it was intentional rather than a failure — remains unimplemented. Coroutine cancellation already
+stops a transfer, but nothing records why it stopped, and resume is only ever as good as the hub's own
+validator: a `.part` with no `ETag`/`Last-Modified` still restarts that one file from byte zero
+regardless of how the previous attempt ended.
 
 ## Concurrent downloads of one repo id are the caller's problem
 
-Two concurrent `download()` calls for the same repo id into the same directory share a staging path.
-The benign outcome is that one call's `finally` deletes the other's in-flight work. The bad one is a
-rename landing while the other still holds open descriptors, so writes follow the inode into an
-already-committed repo.
+Two concurrent `download()` calls for the same repo id into the same directory share a staging path
+and write into it independently — interleaved writes to the same destination file are a corruption
+risk on their own, before either call reaches its commit step. Whichever commits first renames
+staging onto `target`; if the other still holds open descriptors into it, its writes follow the inode
+into what is now a committed repo. If the second call reaches its own commit afterward, `target`'s
+marker still names the same repo id — both calls share it — so the guard against replacing a
+directory this method did not write does not catch this either: the second call deletes the first's
+freshly committed repo and renames its own version over it.
 
 Documented on `download`'s KDoc. Serialising is the caller's responsibility.
 
