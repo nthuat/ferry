@@ -5,6 +5,10 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// See :ferry's build.gradle.kts for what 0.x signals here.
+group = "dev.thuat"
+version = "0.1.0"
+
 android {
     namespace = "dev.thuat.ferry.work"
     compileSdk = 35

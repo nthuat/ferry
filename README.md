@@ -8,6 +8,12 @@ Downloads AI model repositories to Android devices, and refuses to do it badly.
 > interrupted download resumes across process death — pause is the one still not done. Not published
 > to Maven.
 
+**0.x note:** `RepoProgress` is a sealed interface, and pause — stopping a download on purpose and
+recording that, rather than as a failure — is still unimplemented (see Guarantee 4). Adding it later
+needs a new `RepoProgress` case, which breaks any consumer's exhaustive `when`. The hub interface
+(`ModelRepo`) is likewise expected to grow a real error taxonomy beyond a bare `IOException`. Both may
+break before `1.0.0` — a deliberate use of what `0.x` means in semver, not instability.
+
 ```kotlin
 val ferry = Ferry.huggingFace()
 

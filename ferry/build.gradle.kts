@@ -6,6 +6,11 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+// 0.x, deliberately: RepoProgress is sealed and pause is future work (README's "0.x" note) — a
+// Paused case would be source-breaking for every exhaustive `when` once this hits 1.0.0. Free at 0.x.
+group = "dev.thuat"
+version = "0.1.0"
+
 java {
     sourceCompatibility = JavaVersion.VERSION_17
     targetCompatibility = JavaVersion.VERSION_17
