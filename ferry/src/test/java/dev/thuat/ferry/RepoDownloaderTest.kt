@@ -1158,6 +1158,12 @@ class RepoDownloaderTest {
      * about a previously committed copy of the same repo id, which may be complete, verified, and in
      * use by the host right now. `abandon` must never resolve against `into` itself, only against
      * `into/.staging`.
+     *
+     * Branch review: with only a committed copy and no staging, this used to pass for the wrong
+     * reason — `abandon` found `stagingDir.exists()` false and returned early having done nothing at
+     * all, which would pass identically for a completely broken `abandon` that never deletes
+     * anything. Now stages this same id too, so the assertion on `staged` only passes if `abandon`
+     * actually deletes staging, and the assertion on `committed` only means something once it does.
      */
     @Test
     fun `abandon does not touch an already committed repo`() {
@@ -1166,9 +1172,15 @@ class RepoDownloaderTest {
             writeText("committed bytes")
         }
         File(temp.root, "a/b/.ferry").writeText("a/b")
+        val staged = File(temp.root, ".staging/a/b.d/model.bin.part").apply {
+            parentFile?.mkdirs()
+            writeText("in-flight bytes, unrelated to the committed copy above")
+        }
 
-        runBlocking { downloaderFor(emptyList()).abandon("a/b", temp.root) }
+        val result = runBlocking { downloaderFor(emptyList()).abandon("a/b", temp.root) }
 
+        assertTrue(result.isSuccess)
+        assertFalse("abandon must actually delete this repo id's own staging", staged.exists())
         assertTrue("abandoning a download says nothing about a completed one", committed.exists())
         assertEquals("committed bytes", committed.readText())
     }
