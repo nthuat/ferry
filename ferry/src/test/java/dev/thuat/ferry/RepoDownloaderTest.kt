@@ -129,11 +129,11 @@ class RepoDownloaderTest {
     @Test
     fun `a mostly staged download only needs the remaining bytes`() {
         val body = "0123456789"
-        File(temp.root, ".staging/a/b/model.bin.part").apply {
+        File(temp.root, ".staging/a/b.d/model.bin.part").apply {
             parentFile?.mkdirs()
             writeText(body.take(8))
         }
-        File(temp.root, ".staging/a/b/model.bin.validator").writeText("\"v1\"")
+        File(temp.root, ".staging/a/b.d/model.bin.validator").writeText("\"v1\"")
         val files = listOf(remote("model.bin", body.length.toLong(), shaOf(body)))
         server.enqueue(
             MockResponse().setResponseCode(206).setBody(body.drop(8))
@@ -162,7 +162,7 @@ class RepoDownloaderTest {
     @Test
     fun `a complete-looking staged file that fails the manifest's declared size is not credited`() {
         val body = "0123456789"
-        File(temp.root, ".staging/a/b/model.bin").apply {
+        File(temp.root, ".staging/a/b.d/model.bin").apply {
             parentFile?.mkdirs()
             // Complete by the server's own (stale) reckoning, but short of what this manifest declares.
             writeText(body.take(6))
@@ -957,7 +957,7 @@ class RepoDownloaderTest {
         // own Content-Length (5, matching what MockWebServer actually sent), agrees they match, and
         // renames part onto the final in-staging name before returning success. It is the outer,
         // stricter check against the manifest's declared size (13) that then fails.
-        val staged = File(temp.root, ".staging/a/b/model.bin")
+        val staged = File(temp.root, ".staging/a/b.d/model.bin")
         assertTrue("the partial file is the resume point and must survive", staged.isFile)
         assertEquals(5, staged.length())
     }
@@ -976,7 +976,7 @@ class RepoDownloaderTest {
      */
     @Test
     fun `a staged file the manifest no longer lists is discarded`() {
-        File(temp.root, ".staging/a/b/gone.bin.part").apply {
+        File(temp.root, ".staging/a/b.d/gone.bin.part").apply {
             parentFile?.mkdirs()
             writeText("stale bytes from a manifest that no longer lists this file")
         }
@@ -1007,11 +1007,11 @@ class RepoDownloaderTest {
      */
     @Test
     fun `a staged file the manifest still lists survives to be resumed`() {
-        val partial = File(temp.root, ".staging/a/b/config.json.part").apply {
+        val partial = File(temp.root, ".staging/a/b.d/config.json.part").apply {
             parentFile?.mkdirs()
             writeText(configBody.take(4))
         }
-        File(temp.root, ".staging/a/b/config.json.validator").writeText("\"v1\"")
+        File(temp.root, ".staging/a/b.d/config.json.validator").writeText("\"v1\"")
         val files = listOf(remote("config.json", configBody.length.toLong()))
         server.enqueue(
             MockResponse().setResponseCode(206).setBody(configBody.drop(4))
@@ -1043,7 +1043,7 @@ class RepoDownloaderTest {
      */
     @Test
     fun `a staged file under its final name that the manifest no longer lists is discarded too`() {
-        File(temp.root, ".staging/a/b/gone.bin").apply {
+        File(temp.root, ".staging/a/b.d/gone.bin").apply {
             parentFile?.mkdirs()
             writeText("a file the server considered complete, but the manifest no longer lists")
         }
@@ -1068,7 +1068,7 @@ class RepoDownloaderTest {
      */
     @Test
     fun `a staged file that already satisfies the manifest is not re-fetched`() {
-        File(temp.root, ".staging/a/b/config.json").apply {
+        File(temp.root, ".staging/a/b.d/config.json").apply {
             parentFile?.mkdirs()
             writeText(configBody)
         }
@@ -1090,7 +1090,7 @@ class RepoDownloaderTest {
      */
     @Test
     fun `a skipped file reports Skipped instead of Downloading`() {
-        File(temp.root, ".staging/a/b/config.json").apply {
+        File(temp.root, ".staging/a/b.d/config.json").apply {
             parentFile?.mkdirs()
             writeText(configBody)
         }
@@ -1122,7 +1122,7 @@ class RepoDownloaderTest {
      */
     @Test
     fun `a staged file whose bytes do not match the manifest is still fetched`() {
-        File(temp.root, ".staging/a/b/model.bin").apply {
+        File(temp.root, ".staging/a/b.d/model.bin").apply {
             parentFile?.mkdirs()
             writeText("wrong bytes, wrong length, staged under the right name")
         }
@@ -1137,11 +1137,11 @@ class RepoDownloaderTest {
 
     @Test
     fun `abandon removes only this repo's staging`() {
-        val mine = File(temp.root, ".staging/a/b/model.bin.part").apply {
+        val mine = File(temp.root, ".staging/a/b.d/model.bin.part").apply {
             parentFile?.mkdirs()
             writeText("mine")
         }
-        val other = File(temp.root, ".staging/c/d/model.bin.part").apply {
+        val other = File(temp.root, ".staging/c/d.d/model.bin.part").apply {
             parentFile?.mkdirs()
             writeText("other")
         }
@@ -1201,11 +1201,11 @@ class RepoDownloaderTest {
     /** A `.part` with a validator is exactly what `ResumableDownloader` resumes from — see its own KDoc. */
     @Test
     fun `stagedBytes credits a part file that has a validator`() {
-        File(temp.root, ".staging/a/b/model.bin.part").apply {
+        File(temp.root, ".staging/a/b.d/model.bin.part").apply {
             parentFile?.mkdirs()
             writeText("12345678") // 8 bytes
         }
-        File(temp.root, ".staging/a/b/model.bin.validator").writeText("\"v1\"")
+        File(temp.root, ".staging/a/b.d/model.bin.validator").writeText("\"v1\"")
 
         assertEquals(8L, downloaderFor(emptyList()).stagedBytes("a/b", temp.root))
     }
@@ -1217,7 +1217,7 @@ class RepoDownloaderTest {
      */
     @Test
     fun `stagedBytes does not credit a part file with no validator`() {
-        File(temp.root, ".staging/a/b/model.bin.part").apply {
+        File(temp.root, ".staging/a/b.d/model.bin.part").apply {
             parentFile?.mkdirs()
             writeText("12345678")
         }
@@ -1232,7 +1232,7 @@ class RepoDownloaderTest {
      */
     @Test
     fun `stagedBytes counts a bare staged file under its final name`() {
-        File(temp.root, ".staging/a/b/config.json").apply {
+        File(temp.root, ".staging/a/b.d/config.json").apply {
             parentFile?.mkdirs()
             writeText(configBody)
         }
@@ -1242,15 +1242,15 @@ class RepoDownloaderTest {
 
     @Test
     fun `stagedBytes sums every staged file's reusable bytes together, touching no network`() {
-        File(temp.root, ".staging/a/b/config.json").apply {
+        File(temp.root, ".staging/a/b.d/config.json").apply {
             parentFile?.mkdirs()
             writeText(configBody) // bare, complete-looking: counted in full
         }
-        File(temp.root, ".staging/a/b/model.bin.part").apply {
+        File(temp.root, ".staging/a/b.d/model.bin.part").apply {
             writeText("12345678") // 8 resumable bytes, credited
         }
-        File(temp.root, ".staging/a/b/model.bin.validator").writeText("\"v1\"")
-        File(temp.root, ".staging/a/b/other.bin.part").writeText("not credited, no validator")
+        File(temp.root, ".staging/a/b.d/model.bin.validator").writeText("\"v1\"")
+        File(temp.root, ".staging/a/b.d/other.bin.part").writeText("not credited, no validator")
 
         val expected = configBody.length.toLong() + 8L
         assertEquals(expected, downloaderFor(emptyList()).stagedBytes("a/b", temp.root))
@@ -1263,11 +1263,11 @@ class RepoDownloaderTest {
      */
     @Test
     fun `stagedBytes ignores the ownership marker written just before commit`() {
-        File(temp.root, ".staging/a/b/config.json").apply {
+        File(temp.root, ".staging/a/b.d/config.json").apply {
             parentFile?.mkdirs()
             writeText(configBody)
         }
-        File(temp.root, ".staging/a/b/.ferry").writeText("a/b")
+        File(temp.root, ".staging/a/b.d/.ferry").writeText("a/b")
 
         assertEquals(configBody.length.toLong(), downloaderFor(emptyList()).stagedBytes("a/b", temp.root))
     }
@@ -1293,5 +1293,109 @@ class RepoDownloaderTest {
 
         assertTrue(result.isFailure)
         assertEquals(5L, downloader.stagedBytes("a/b", temp.root))
+    }
+
+    /**
+     * CRITICAL, whole-branch review — the design argument that staging sits outside the target
+     * directory ("target vs staging" — deleting staging cannot corrupt a committed repo) is true but
+     * too narrow: "owner" and "owner/model" are both ordinary repo ids (`MARKER_FILE`'s own doc), and
+     * staging mirrored that nesting with no shadow tree to guard it the way target has (`MARKER_ROOT`)
+     * — `into/.staging/owner` was a literal ancestor directory of `into/.staging/owner/model`. This is
+     * "staging vs staging", not "target vs staging", and the old argument says nothing about it.
+     *
+     * A failed `download("owner/model")` left its resumable bytes sitting inside "owner"'s own
+     * staging subtree. Downloading "owner" next walked straight into them via `pruneOrphans`, which
+     * has no way to know "owner/model" is a different repo's live scratch: it deleted the file as an
+     * orphan of a manifest that was never its, and the emptied `model/` directory rode
+     * `stagingDir.renameTo(target)` into the committed `into/owner` on the very same rename — foreign
+     * content inside a repo that then reports a cache hit forever, and "owner/model" permanently
+     * refused afterwards (`into/owner/model` now exists with no marker of its own).
+     *
+     * Every assertion below is against public API only (`stagedBytes`, the committed directory
+     * `download` itself returns, `Result.isSuccess`) rather than an internal staging path, so this
+     * proves the actual observable bug, not merely a hardcoded path shape.
+     *
+     * Revert-check: with `stagingDirFor` reverted to a bare `resolveInside(stagingRoot, repoId)`
+     * (staging/RepoDownloader.kt's pre-fix shape), this fails on all three post-owner-download
+     * assertions — see review-fix-report.md for the observed output.
+     */
+    @Test
+    fun `a prefix repo's own download does not reach into a nested repo's staging`() {
+        val modelDownloader = downloaderFor(
+            listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody))),
+        )
+        // A body shorter than declared fails the size check after writing what it sent — same shape
+        // as "a failed download leaves its partial bytes in staging" above.
+        server.enqueue(MockResponse().setBody(weightsBody.take(5)))
+        val modelResult = runBlocking { modelDownloader.download("owner/model", temp.root) }
+        assertTrue(modelResult.isFailure)
+        assertEquals(5L, modelDownloader.stagedBytes("owner/model", temp.root))
+
+        val ownerFiles = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(configBody))
+        val ownerDir = runBlocking { downloaderFor(ownerFiles).download("owner", temp.root) }.getOrThrow()
+
+        assertEquals(
+            "an unrelated prefix repo's own download must not prune owner/model's progress",
+            5L,
+            modelDownloader.stagedBytes("owner/model", temp.root),
+        )
+        assertFalse(
+            "owner/model must never appear inside the committed owner directory",
+            File(ownerDir, "model").exists(),
+        )
+
+        server.enqueue(MockResponse().setBody(weightsBody))
+        val retryResult = runBlocking { modelDownloader.download("owner/model", temp.root) }
+        assertTrue(
+            "owner/model must still be downloadable, not permanently refused by a leftover directory",
+            retryResult.isSuccess,
+        )
+    }
+
+    /**
+     * `abandon` reached a nested id's staging the same way `pruneOrphans` did — via
+     * `deleteRecursively()` on a `stagingDir` that used to be a literal ancestor directory of a
+     * nested id's own. See `stagingDirFor`'s own doc.
+     */
+    @Test
+    fun `abandoning a prefix repo does not touch a nested repo's own staging`() {
+        val modelDownloader = downloaderFor(
+            listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody))),
+        )
+        server.enqueue(MockResponse().setBody(weightsBody.take(5)))
+        runBlocking { modelDownloader.download("owner/model", temp.root) }
+
+        val result = runBlocking { downloaderFor(emptyList()).abandon("owner", temp.root) }
+
+        assertTrue(result.isSuccess)
+        assertEquals(
+            "abandoning a prefix repo id must not delete a nested repo's own staging",
+            5L,
+            modelDownloader.stagedBytes("owner/model", temp.root),
+        )
+    }
+
+    /**
+     * `stagedBytes` summed a nested id's staging into the prefix id's own count the same way —
+     * `stagingDir.walkTopDown()` walked straight into it. See `stagingDirFor`'s own doc.
+     */
+    @Test
+    fun `stagedBytes for a prefix repo does not count a nested repo's own staging`() {
+        val ownerDownloader = downloaderFor(listOf(remote("config.json", configBody.length.toLong())))
+        server.enqueue(MockResponse().setBody(configBody.take(3)))
+        runBlocking { ownerDownloader.download("owner", temp.root) }
+
+        val modelDownloader = downloaderFor(
+            listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody))),
+        )
+        server.enqueue(MockResponse().setBody(weightsBody.take(5)))
+        runBlocking { modelDownloader.download("owner/model", temp.root) }
+
+        assertEquals(
+            "must not sum a nested id's own staged bytes into the prefix id's count",
+            3L,
+            ownerDownloader.stagedBytes("owner", temp.root),
+        )
     }
 }

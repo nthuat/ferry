@@ -97,10 +97,14 @@ private const val MARKER_FILE = ".ferry"
  *
  * Named the same as [MARKER_FILE] — this directory and that file share nothing but a name; Ferry
  * never conflates them. `into/.ferry/X` exists as a plain, possibly-empty directory once repo id
- * `X` is committed, mirroring `into` one-for-one the way `into/.staging/X` already does for staging.
- * A nested id like `X/Y` then creates `into/.ferry/X/Y` as `X`'s own child, without needing to tell
- * `X`'s entry apart from `Y`'s the way a leaf-file scheme would — a directory can always gain
- * another child, so no two ids ever compete for the same path here regardless of commit order.
+ * `X` is committed, mirroring `into` one-for-one — deliberately, and safely, unlike `into/.staging`
+ * (see [stagingDirFor]'s own doc for the Critical that same mirroring caused there, and why this
+ * tree does not share it): nothing here is ever `deleteRecursively()`'d or summed for one repo id at
+ * a time, so `X/Y`'s entry sitting inside `X`'s is exactly the relationship the nested-check below
+ * is built to read, never a way to reach a different id's own bookkeeping by accident. A nested id
+ * like `X/Y` then creates `into/.ferry/X/Y` as `X`'s own child, without needing to tell `X`'s entry
+ * apart from `Y`'s the way a leaf-file scheme would — a directory can always gain another child, so
+ * no two ids ever compete for the same path here regardless of commit order.
  *
  * A shadow entry is written once and never deleted — there is no API that would tell it to be, any
  * more than there is one to clear an ordinary refusal. That makes every entry here a *candidate*
@@ -111,6 +115,13 @@ private const val MARKER_FILE = ".ferry"
  * anything — see that check's own comment.
  */
 private const val MARKER_ROOT = MARKER_FILE
+
+/**
+ * Appended to a repo id's own last path segment when resolving where it stages — see
+ * [stagingDirFor]'s own doc for what nests without it and why suffixing only the last segment is
+ * what stops that.
+ */
+private const val STAGING_SUFFIX = ".d"
 
 /**
  * Downloads a whole model repository, or none of it.
@@ -168,8 +179,13 @@ class RepoDownloader(
             // below moves it out from under this path entirely, so there is nothing left afterward
             // to clean up. A failure is not cleaned up here; Task 3 adds the explicit abandon() that
             // reclaims a staging directory the caller has given up on.
+            //
+            // stagingDir is not a bare resolveInside(stagingRoot, repoId): "owner" and "owner/model"
+            // are both ordinary repo ids (MARKER_FILE's own doc), and staging has no shadow tree the
+            // way target's own nesting question does (MARKER_ROOT) — see stagingDirFor's own doc for
+            // the Critical that caused and the reserved per-id suffix that closes it.
             val stagingRoot = File(into, ".staging")
-            val stagingDir = resolveInside(stagingRoot, repoId)
+            val stagingDir = stagingDirFor(stagingRoot, repoId)
             val target = resolveInside(into, repoId)
 
             // Which ids are committed *nested inside* repoId — see MARKER_ROOT's doc for the shape
@@ -401,11 +417,13 @@ class RepoDownloader(
      * deleting staging on failure so a retry can resume from it; this is what reclaims the bytes when
      * no retry is coming.
      *
-     * Deletes only `into/.staging/[repoId]`, resolved through the same [resolveInside] guard
-     * [download] uses to compute its own `stagingDir` — mirrored here rather than re-argued, so a
-     * hostile or malformed [repoId] cannot escape the staging area any more than it can escape
-     * `download`'s. Touches nothing else: never [into] itself, never the staging root `into/.staging`
-     * itself, and never a committed target.
+     * Deletes only [repoId]'s own staging directory under `into/.staging`, resolved through the same
+     * [stagingDirFor] helper [download] uses to compute its own `stagingDir` — shared rather than
+     * re-argued, so a hostile or malformed [repoId] cannot escape the staging area any more than it
+     * can escape `download`'s, and so this call can never reach a *different* repo id's own staging
+     * the way a bare `resolveInside(stagingRoot, repoId)` once let `deleteRecursively()` below do —
+     * see [stagingDirFor]'s own doc. Touches nothing else: never [into] itself, never the staging
+     * root `into/.staging` itself, and never a committed target.
      *
      * In particular — the property most worth stating plainly — **this method never resolves
      * against, looks at, or touches `into/[repoId]`.** Abandoning an in-progress download says
@@ -419,7 +437,7 @@ class RepoDownloader(
     suspend fun abandon(repoId: String, into: File): Result<Unit> = withContext(dispatcher) {
         try {
             val stagingRoot = File(into, ".staging")
-            val stagingDir = resolveInside(stagingRoot, repoId)
+            val stagingDir = stagingDirFor(stagingRoot, repoId)
             if (stagingDir.exists() && !stagingDir.deleteRecursively()) {
                 return@withContext Result.failure(IOException("cannot delete staging for $repoId"))
             }
@@ -466,7 +484,7 @@ class RepoDownloader(
      *   contributes nothing either, for the same reason.
      */
     fun stagedBytes(repoId: String, into: File): Long = try {
-        val stagingDir = resolveInside(File(into, ".staging"), repoId)
+        val stagingDir = stagingDirFor(File(into, ".staging"), repoId)
         val marker = File(stagingDir, MARKER_FILE)
         if (!stagingDir.isDirectory) {
             0L
@@ -619,6 +637,49 @@ class RepoDownloader(
                     resolveInside(stagingDir, relativePath).delete()
                 }
             }
+    }
+
+    /**
+     * Where [repoId] stages under [stagingRoot] (`into/.staging`).
+     *
+     * Naively this would be `resolveInside(stagingRoot, repoId)` — mirroring [repoId]'s own
+     * "/"-separated structure exactly the way `target` still does. But "owner" and "owner/model" are
+     * both ordinary repo ids (see [MARKER_FILE]'s doc), and unlike `target`, staging has no shadow
+     * tree ([MARKER_ROOT]) to tell a genuinely nested commit apart from reaching into a *different*
+     * repo's own in-flight scratch: `resolveInside(stagingRoot, "owner")` was a literal ancestor
+     * directory of `resolveInside(stagingRoot, "owner/model")`, so [pruneOrphans] walking "owner"'s
+     * staging walked straight into "owner/model"'s live `.part` files and deleted them as orphans of
+     * a manifest that was never theirs — [abandon] and [stagedBytes] reached the same way, via
+     * `deleteRecursively()` and a recursive sum respectively. The emptied nested directory then rode
+     * `stagingDir.renameTo(target)` straight into the committed repo, because [pruneOrphans] only
+     * ever deletes files (tracked separately; see its own doc).
+     *
+     * Fixed by appending [STAGING_SUFFIX] to [repoId]'s own *last* path segment, rather than treating
+     * the joined string as one more ordinary path component. "owner" alone resolves to `owner.d` — a
+     * single path segment, different from plain `owner`. Any id "owner" is itself a prefix of —
+     * "owner/model", the shape this bug is about — continues from plain, *unsuffixed* `owner`,
+     * because only a repo id's own last segment is ever touched: `into/.staging/owner` therefore
+     * names no repo's staging at all, only `into/.staging/owner.d` and `into/.staging/owner/model.d`
+     * do, and neither is an ancestor of the other. Two *unrelated* ids can still collide here only if
+     * one id's own path segment is, character for character, another id's last segment with
+     * [STAGING_SUFFIX] already appended — an id that itself contains the literal text "owner.d" as
+     * one of its own segments. That requires deliberately constructing a path to collide with this
+     * library's own reserved suffix; it is the same shape of residual docs/known-limitations.md
+     * already accepts for a `..` that reconstructs a legitimate-looking path, and no more reachable —
+     * stated here rather than left silent, not treated as a gap worth closing beyond that.
+     */
+    private fun stagingDirFor(stagingRoot: File, repoId: String): File {
+        // Validates repoId exactly as an unsuffixed resolve always did — rejects "", "..", and any
+        // escape — before this function's own suffixing gets a chance to be more permissive:
+        // resolving "" + STAGING_SUFFIX lands on a proper descendant of stagingRoot, not stagingRoot
+        // itself, so the "strictly inside" guard alone would not catch an empty repoId below.
+        resolveInside(stagingRoot, repoId)
+        // trimEnd('/'): a trailing separator must not turn the suffix into a new segment of its own
+        // ("owner/" -> "owner/.d", three segments) instead of extending the last real one
+        // ("owner.d", two) — repoId with or without a trailing slash names the same target directory
+        // (File(into, "owner/").canonicalPath == File(into, "owner").canonicalPath), and must name
+        // the same staging directory too.
+        return resolveInside(stagingRoot, "${repoId.trimEnd('/')}$STAGING_SUFFIX")
     }
 
     /**
