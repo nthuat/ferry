@@ -24,7 +24,11 @@ import androidx.work.ListenableWorker.Result as WorkResult
  * Not built by WorkManager's default, reflection-based factory: [repoDownloader] and
  * [notifications] cannot travel through [Data] (primitives only) or be conjured from a bare
  * `Context`. Construct this only through [RepoDownloadWorkerFactory] — see its own KDoc for how
- * to register it — or, in a test, through `TestListenableWorkerBuilder.setWorkerFactory`.
+ * to register it — or, in a test, through `TestListenableWorkerBuilder.setWorkerFactory`. The
+ * primary constructor is `internal` rather than merely documented that way: [nowMillis] is a test
+ * seam this module's own tests use directly, and an `internal` constructor keeps that reachable for
+ * them while never publishing it — a public declaration would be one more thing a 1.0.0 could not
+ * take back.
  *
  * ## Input and output — what survives the [Data] boundary
  *
@@ -137,7 +141,7 @@ import androidx.work.ListenableWorker.Result as WorkResult
  * the host's own callback, called once before the first byte moves and again on every throttled
  * progress update, so text, icon, channel and actions all stay the host's decision, never Ferry's.
  */
-class RepoDownloadWorker(
+class RepoDownloadWorker internal constructor(
     appContext: Context,
     params: WorkerParameters,
     private val repoDownloader: RepoDownloader,

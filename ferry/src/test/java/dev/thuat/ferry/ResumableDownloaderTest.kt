@@ -204,7 +204,7 @@ class ResumableDownloaderTest {
 
     /**
      * Request.Builder.url throws IllegalArgumentException, not IOException, for a malformed URL.
-     * RemoteFile.url reaches here from a ModelRepo implementation, and ModelRepo is public — so a
+     * RemoteFile.url reaches here from a ModelHub implementation, and ModelHub is public — so a
      * third-party adapter's bad URL would otherwise throw straight out of a Result-returning call.
      */
     @Test

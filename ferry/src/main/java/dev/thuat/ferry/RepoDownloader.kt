@@ -1,5 +1,6 @@
 package dev.thuat.ferry
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -131,7 +132,7 @@ private const val STAGING_SUFFIX = ".d"
  * half-written or half-correct.
  */
 class RepoDownloader(
-    private val repo: ModelRepo,
+    private val repo: ModelHub,
     private val downloader: ResumableDownloader,
     private val spaceCheck: SpaceCheck = SpaceCheck(),
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
@@ -148,27 +149,36 @@ class RepoDownloader(
      * `target`'s marker still names the same repo id, so the guard against replacing a directory
      * this method did not write does not catch this either: the second call deletes the first's
      * freshly committed repo and renames its own version over it. Serialising calls per repo id is
-     * the caller's responsibility; different repo ids are independent. See also [abandon]'s own KDoc
-     * for the same hazard between `abandon` and `download`.
+     * the caller's responsibility; different repo ids are independent. See also [abandonStaging]'s
+     * own KDoc for the same hazard between `abandonStaging` and `download`.
      */
     suspend fun download(
         repoId: String,
         into: File,
         onProgress: (RepoProgress) -> Unit = {},
     ): Result<File> = withContext(dispatcher) {
-        val manifest = repo.manifest(repoId).getOrElse { return@withContext Result.failure(it) }
-
-        // An empty manifest is a listing that failed without saying so — a hub answering 200 with
-        // [], a revision that does not exist, a filter that matched nothing. Refused here because
-        // every downstream check is written as "every file is correct", and every file of no files
-        // is trivially correct: the cache check would call any directory that happened to exist a
-        // hit and return it, and with nothing there the commit step would publish a repo containing
-        // only its own marker. Both are permanent cache hits that no later call can repair.
-        if (manifest.files.isEmpty()) {
-            return@withContext Result.failure(IOException("no files listed for $repoId"))
-        }
-
         try {
+            // Inside the try, not before it: `repo` is a third-party ModelHub (its own KDoc), and
+            // nothing stops an implementation from throwing instead of returning Result.failure — a
+            // call site before this try let that throw escape download()'s own Result<File> contract
+            // entirely. A throw here is now caught below like any other failure in this method.
+            // asDownloadFailure also normalises the well-behaved-looking case: a hub can return
+            // Result.failure(anything), an untyped Throwable that need not be an IOException, and
+            // every other failure this method hands back already is one.
+            val manifest = repo.manifest(repoId).getOrElse { failure ->
+                return@withContext Result.failure(failure.asDownloadFailure())
+            }
+
+            // An empty manifest is a listing that failed without saying so — a hub answering 200 with
+            // [], a revision that does not exist, a filter that matched nothing. Refused here because
+            // every downstream check is written as "every file is correct", and every file of no files
+            // is trivially correct: the cache check would call any directory that happened to exist a
+            // hit and return it, and with nothing there the commit step would publish a repo containing
+            // only its own marker. Both are permanent cache hits that no later call can repair.
+            if (manifest.files.isEmpty()) {
+                return@withContext Result.failure(IOException("no files listed for $repoId"))
+            }
+
             // repoId is used as a relative path rather than flattened into one directory name, so
             // two distinct ids (e.g. "a/b" and "a--b") can never collide onto the same directory.
             //
@@ -182,8 +192,8 @@ class RepoDownloader(
             // as far as it got, on disk, deliberately, so the next attempt can resume from those
             // bytes instead of re-fetching them. Success consumes it — stagingDir.renameTo(target)
             // below moves it out from under this path entirely, so there is nothing left afterward
-            // to clean up. A failure is not cleaned up here; Task 3 adds the explicit abandon() that
-            // reclaims a staging directory the caller has given up on.
+            // to clean up. A failure is not cleaned up here; Task 3 adds the explicit abandonStaging()
+            // that reclaims a staging directory the caller has given up on.
             //
             // stagingDir is not a bare resolveInside(stagingRoot, repoId): "owner" and "owner/model"
             // are both ordinary repo ids (MARKER_FILE's own doc), and staging has no shadow tree the
@@ -419,6 +429,26 @@ class RepoDownloader(
                 return@withContext Result.failure(IOException("cannot record $repoId as committed"))
             }
 
+            // Final check, immediately before the rename that publishes this repo. Cheap on purpose:
+            // one File.length() per manifest file, no hashing — every byte was already verified once
+            // by the loop above, and re-reading gigabytes here would be the wrong trade. The only
+            // thing this catches is staging changing *after* the loop already verified it, which the
+            // loop itself has no way to see: `abandonStaging` racing this call deletes exactly the
+            // files the loop already verified and moved past (docs/known-limitations.md), and two
+            // concurrent `download` calls for the same repo id can do the same to each other. Either
+            // way, without this check the commit below still finds everything *it* looks at correct —
+            // it looked at every file before the race landed — and publishes a repo silently missing
+            // whatever vanished, as Result.success. This turns that into a clean Result.failure
+            // instead, with nothing committed.
+            val corrupted = manifest.files.firstOrNull { file ->
+                resolveInside(stagingDir, file.path).length() != file.sizeBytes
+            }
+            if (corrupted != null) {
+                return@withContext Result.failure(
+                    VerificationException(corrupted.path, "missing or wrong size immediately before commit"),
+                )
+            }
+
             target.parentFile?.mkdirs()
             if (!stagingDir.renameTo(target)) {
                 return@withContext Result.failure(IOException("cannot commit $target"))
@@ -426,10 +456,35 @@ class RepoDownloader(
 
             onProgress(RepoProgress.Complete(repoId, target))
             Result.success(target)
-        } catch (e: IOException) {
-            Result.failure(e)
+        } catch (e: CancellationException) {
+            // Structured concurrency depends on cancellation propagating; swallowing it here would
+            // make this the one place in the library that breaks that.
+            throw e
+        } catch (e: Exception) {
+            // Widened from IOException so a throw out of repo.manifest() (moved inside this try
+            // above) is caught here instead of escaping this method's own Result<File> contract.
+            // Strictly wider than before, not a behaviour change for the rest of this try: every other
+            // line above this catch already only ever throws IOException in practice, so this only
+            // changes what happens for a throw that was never anticipated in the first place —
+            // asDownloadFailure keeps the result the IOException-only type every other failure in this
+            // method already is.
+            Result.failure(e.asDownloadFailure())
         }
     }
+
+    /**
+     * [this] unchanged if it is already an [IOException] — or a subtype, like
+     * [InsufficientSpaceException] or [VerificationException] — otherwise wrapped in one.
+     *
+     * `repo` is a third-party [ModelHub] (see its own KDoc on [ModelHub.manifest]), so its failure can
+     * arrive as literally anything: a `Result.failure` carrying an unrelated `Throwable`, or, now that
+     * the call is inside [download]'s own try, whatever type an uncaught throw happens to be. Every
+     * other failure [download] produces or passes through is already an [IOException], so normalising
+     * here — rather than handing back whatever the hub gave — is what keeps that true regardless of
+     * how a hub misbehaves.
+     */
+    private fun Throwable.asDownloadFailure(): IOException =
+        this as? IOException ?: IOException(message ?: toString(), this)
 
     /**
      * Reclaims the staging bytes of a [download] for [repoId] under [into] that the caller has given
@@ -437,18 +492,25 @@ class RepoDownloader(
      * deleting staging on failure so a retry can resume from it; this is what reclaims the bytes when
      * no retry is coming.
      *
-     * **Not safe to call concurrently with [download] for the same [repoId] and [into].** `download`
-     * recreates whatever directories it needs as it goes (`destination.parentFile?.mkdirs()`) and
-     * verifies only the one file it is currently fetching — never a file a previous iteration of the
-     * same attempt already verified and moved past. An `abandon` landing mid-loop deletes exactly
-     * those already-verified files out from under it; the loop has no way to notice and does not
-     * re-fetch them, so every later file still verifies fine on its own, the commit at the end of
-     * `download` still finds everything *it* checked present and correct, and `stagingDir.renameTo`
-     * still succeeds. The result is `Result.success`, publishing a repo silently missing every file
-     * downloaded before the `abandon` landed — a committed partial model, not a failure either call
-     * could detect or report. Serialising `abandon` against `download` for the same repo id is the
-     * caller's responsibility, the same way two concurrent `download` calls are (see `download`'s own
-     * KDoc and docs/known-limitations.md's concurrency entry) — nothing here enforces it.
+     * **Not safe to call concurrently with [download] for the same [repoId] and [into] — but no longer
+     * unsafe in the way that used to matter most.** `download` recreates whatever directories it needs
+     * as it goes (`destination.parentFile?.mkdirs()`) and verifies only the one file it is currently
+     * fetching — never a file a previous iteration of the same attempt already verified and moved
+     * past. An `abandonStaging` landing mid-loop deletes exactly those already-verified files out from
+     * under it, and the loop has no way to notice or re-fetch them. What that used to cost: every
+     * later file still verified fine on its own, `download`'s own commit found everything *it* checked
+     * present and correct, and `stagingDir.renameTo` still succeeded — `Result.success`, publishing a
+     * repo silently missing every file downloaded before `abandonStaging` landed. `download`'s own
+     * final pre-commit check, immediately before that rename, now re-confirms every manifest file is
+     * still present at its declared size right before the rename — exactly what a mid-loop
+     * `abandonStaging` breaks — so this race now ends in a clean `Result.failure` with
+     * nothing committed, never a silent partial model. Still not something to rely on instead of
+     * serialising: the loser's network transfer and disk writes are wasted rather than avoided, and
+     * this says nothing about two concurrent `download` calls corrupting each other's writes to a
+     * shared file, which is a different hazard this check does not touch (see `download`'s own KDoc
+     * and docs/known-limitations.md's concurrency entry). Serialising `abandonStaging` against
+     * `download` for the same repo id remains the caller's responsibility; nothing here enforces it,
+     * only detects the damage this one specific race used to cause.
      *
      * Deletes only [repoId]'s own staging directory under `into/.staging`, resolved through the same
      * [stagingDirFor] helper [download] uses to compute its own `stagingDir` — shared rather than
@@ -462,12 +524,13 @@ class RepoDownloader(
      * against, looks at, or touches `into/[repoId]`.** Abandoning an in-progress download says
      * nothing about a previously committed copy of the same repo id, which may be complete, verified,
      * and in use by the host right now. A method named `abandon` that deleted that would be the worst
-     * API in this library.
+     * API in this library — named `abandonStaging` instead, so the one thing it touches is in its own
+     * name.
      *
      * No staging present for [repoId] is success, not failure: the caller asked for a state — this
      * repo's staging reclaimed — and that state already holds.
      */
-    suspend fun abandon(repoId: String, into: File): Result<Unit> = withContext(dispatcher) {
+    suspend fun abandonStaging(repoId: String, into: File): Result<Unit> = withContext(dispatcher) {
         try {
             val stagingRoot = File(into, ".staging")
             val stagingDir = stagingDirFor(stagingRoot, repoId)
@@ -498,8 +561,8 @@ class RepoDownloader(
      * [File.walkTopDown] over however many files a repo has staged is still blocking file I/O, and
      * this was the one non-suspend public method on this class, running that walk directly on
      * whatever thread called it. It now `suspend`s and runs on [dispatcher], the same one [download]
-     * and [abandon] already use, rather than asking every caller to know to move it off their own
-     * thread by hand — which the sample app's own `SampleViewModel` was doing with a manual
+     * and [abandonStaging] already use, rather than asking every caller to know to move it off their
+     * own thread by hand — which the sample app's own `SampleViewModel` was doing with a manual
      * `withContext(Dispatchers.IO)` around this exact call, direct evidence the shape belonged here
      * instead.
      *
@@ -727,7 +790,7 @@ class RepoDownloader(
      * repo's own in-flight scratch: `resolveInside(stagingRoot, "owner")` was a literal ancestor
      * directory of `resolveInside(stagingRoot, "owner/model")`, so [pruneOrphans] walking "owner"'s
      * staging walked straight into "owner/model"'s live `.part` files and deleted them as orphans of
-     * a manifest that was never theirs — [abandon] and [stagedBytes] reached the same way, via
+     * a manifest that was never theirs — [abandonStaging] and [stagedBytes] reached the same way, via
      * `deleteRecursively()` and a recursive sum respectively. The emptied nested directory then rode
      * `stagingDir.renameTo(target)` straight into the committed repo, because [pruneOrphans] only
      * ever deletes files (tracked separately; see its own doc).

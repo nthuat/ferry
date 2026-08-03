@@ -8,7 +8,7 @@ import androidx.work.WorkerFactory
 import androidx.work.WorkerParameters
 import androidx.work.testing.TestListenableWorkerBuilder
 import androidx.work.workDataOf
-import dev.thuat.ferry.ModelRepo
+import dev.thuat.ferry.ModelHub
 import dev.thuat.ferry.RemoteFile
 import dev.thuat.ferry.RepoDownloader
 import dev.thuat.ferry.RepoManifest
@@ -59,7 +59,7 @@ class RepoDownloadWorkerTest {
     }
 
     /** Mirrors `RepoDownloaderTest`'s own helper: a repo whose files MockWebServer serves. */
-    private fun fakeRepo(files: List<RemoteFile>) = object : ModelRepo {
+    private fun fakeRepo(files: List<RemoteFile>) = object : ModelHub {
         override suspend fun manifest(repoId: String) = Result.success(RepoManifest(repoId, files))
     }
 

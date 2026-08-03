@@ -8,6 +8,12 @@ Downloads AI model repositories to Android devices, and refuses to do it badly.
 > interrupted download resumes across process death — pause is the one still not done. Not published
 > to Maven.
 
+**0.x note:** `RepoProgress` is a sealed interface, and pause — stopping a download on purpose and
+recording that, rather than as a failure — is still unimplemented (see Guarantee 4). Adding it later
+needs a new `RepoProgress` case, which breaks any consumer's exhaustive `when`. The hub interface
+(`ModelHub`) is likewise expected to grow a real error taxonomy beyond a bare `IOException`. Both may
+break before `1.0.0` — a deliberate use of what `0.x` means in semver, not instability.
+
 ```kotlin
 val ferry = Ferry.huggingFace()
 
@@ -40,10 +46,23 @@ client it built behind your back.
 
 ## Getting it
 
-Not on Maven Central. `dev.thuat` would need `thuat.dev` to be a domain this project owns, and it
-is not one, so publishing is a decision rather than a formality.
+Not on Maven Central yet. The coordinates are settled — `dev.thuat:ferry` and `dev.thuat:ferry-work`,
+currently `0.1.0` — and `dev.thuat` is reserved: this project's owner owns `thuat.dev`. Both modules'
+`build.gradle.kts` already carry the full publishing setup (`maven-publish`, `signing`, sources and
+javadoc jars, a POM with name/description/url/licenses/developers/scm — see
+`gradle/publishing.gradle.kts` for the parts shared between them). What is still missing is entirely
+account and credential setup, not code:
 
-Until then, a composite build is the way to depend on it without vendoring a copy:
+- A Sonatype Central Portal account, with the `dev.thuat` namespace claimed on it.
+- A DNS TXT record on `thuat.dev` proving ownership of that namespace to Central Portal.
+- A GPG key pair, published to a public keyserver. Its ASCII-armored private key and passphrase go in
+  `signingInMemoryKey` / `signingInMemoryKeyPassword`; a Central Portal user token goes in
+  `mavenCentralUsername` / `mavenCentralPassword`. All four are read from a Gradle property or an
+  environment variable of the same name (`gradle/publishing.gradle.kts`), with no default — so
+  building or testing this repository, including `./gradlew :ferry:publishToMavenLocal`, needs none of
+  them. A contributor cloning this never needs a signing key.
+
+Until it's actually published, a composite build is the way to depend on it without vendoring a copy:
 
 ```kotlin
 // settings.gradle.kts
@@ -93,7 +112,7 @@ honest part. A dropped connection is recovered from mid-attempt via `Range`. A f
 verifying — from this attempt or an earlier one — is not fetched again. Staging itself is durable: a
 failed attempt, a cancellation, or the process dying all leave it exactly as far as it got, and nothing
 deletes it until either a later `download` call consumes it by committing the repo, or the caller
-explicitly calls `abandon` because no retry is coming. A second `download` call for the same repo id —
+explicitly calls `abandonStaging` because no retry is coming. A second `download` call for the same repo id —
 even from a fresh process — resumes from whatever is already on disk instead of restarting from zero,
 and `stagedBytes(repoId, into)` lets a caller detect there is something to resume before calling
 `download` at all, the number behind a "Resume, N already downloaded" row.
@@ -172,10 +191,10 @@ per file:
 commit atomically     shared
 ```
 
-So a hub is one `ModelRepo` implementation, roughly forty lines:
+So a hub is one `ModelHub` implementation, roughly forty lines:
 
 ```kotlin
-interface ModelRepo {
+interface ModelHub {
     suspend fun manifest(repoId: String): Result<RepoManifest>
 }
 
@@ -246,14 +265,14 @@ collision. `OllamaTest` pins this exact manifest shape so it cannot regress unno
 
 HuggingFace and ModelScope are a hub and its mirror: they publish identical SHA-256 for identical
 content, so one can stand in for the other and be verified against the same expected hash. Two of
-those proves `ModelRepo` compiles against a second hub, not that it survives one — both are REST
+those proves `ModelHub` compiles against a second hub, not that it survives one — both are REST
 listings of named files with per-file content hashes; structurally, neither was ever going to break
 the interface.
 
 Ollama was added to find out whether a hub *could*. Its manifest is an OCI image manifest, not a
 directory listing: a layer is `mediaType` + `size` + `digest`, no filename anywhere, so
 `RemoteFile.path` has to be synthesized rather than read off the response — the one part of
-`ModelRepo` a HuggingFace-shaped hub can never exercise. It fit without contortion: `ModelRepo` and
+`ModelHub` a HuggingFace-shaped hub can never exercise. It fit without contortion: `ModelHub` and
 `RemoteFile` needed no change, which `RemoteFile.url`'s own KDoc already anticipated (it is
 adapter-resolved rather than derived from `path` precisely because "not every hub names its files").
 

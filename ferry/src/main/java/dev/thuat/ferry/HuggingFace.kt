@@ -1,6 +1,5 @@
 package dev.thuat.ferry
 
-import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -21,10 +20,16 @@ import java.io.IOException
 class HuggingFace(
     private val client: OkHttpClient,
     private val baseUrl: String = "https://huggingface.co",
-    private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
-) : ModelRepo {
+) : ModelHub {
 
-    override suspend fun manifest(repoId: String): Result<RepoManifest> = withContext(dispatcher) {
+    // Dispatchers.IO directly, not a constructor-injected dispatcher: no test and no consumer ever
+    // passed one, and RepoDownloader.download already wraps every ModelHub call in withContext(its
+    // own dispatcher) — an injected one here only bought a redundant nested context switch on the
+    // normal path. Kept as an explicit withContext rather than dropped outright: this function is a
+    // public suspend fun on a public class, and docs/known-limitations.md contemplates a host calling
+    // it directly rather than only through RepoDownloader, which would otherwise run this on
+    // whatever dispatcher the caller happened to be on.
+    override suspend fun manifest(repoId: String): Result<RepoManifest> = withContext(Dispatchers.IO) {
         try {
             val base = baseUrl.toHttpUrlOrNull()
                 ?: return@withContext Result.failure(IOException("invalid base URL: $baseUrl"))

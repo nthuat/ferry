@@ -4,11 +4,24 @@ plugins {
     id("java-library")
     id("org.jetbrains.kotlin.jvm")
     id("org.jetbrains.kotlin.plugin.serialization")
+    id("maven-publish")
+    id("signing")
 }
+
+// 0.x, deliberately: RepoProgress is sealed and pause is future work (README's "0.x" note) — a
+// Paused case would be source-breaking for every exhaustive `when` once this hits 1.0.0. Free at 0.x.
+group = "dev.thuat"
+version = "0.1.0"
 
 java {
     sourceCompatibility = JavaVersion.VERSION_17
     targetCompatibility = JavaVersion.VERSION_17
+    // Maven Central rejects a publication missing either jar. withJavadocJar() packages whatever the
+    // standard `javadoc` task produces — empty for a Kotlin-only source set, which is a real gap
+    // (no KDoc-generated API docs) but a separate, larger addition (a Dokka dependency) than this
+    // task's scope; the jar existing is what Central actually requires to accept the publication.
+    withSourcesJar()
+    withJavadocJar()
 }
 
 kotlin {
@@ -126,3 +139,22 @@ tasks.register("checkEmbeddable") {
 }
 
 tasks.named("check") { dependsOn("checkEmbeddable") }
+
+// Credentials, signing and the POM fields shared with :ferry-work live in gradle/publishing.gradle.kts.
+apply(from = "$rootDir/gradle/publishing.gradle.kts")
+
+publishing {
+    publications {
+        create<MavenPublication>("release") {
+            from(components["java"])
+            pom {
+                name.set("ferry")
+                description.set(
+                    "Resumable, verified downloads of AI model repositories from HuggingFace, " +
+                        "ModelScope or Ollama — never a partial or corrupt model, never starts a " +
+                        "download the device can't finish.",
+                )
+            }
+        }
+    }
+}

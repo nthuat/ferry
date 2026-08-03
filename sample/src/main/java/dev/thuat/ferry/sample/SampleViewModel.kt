@@ -84,8 +84,8 @@ class SampleViewModel(application: Application) : AndroidViewModel(application) 
     init {
         viewModelScope.launch {
             // No withContext(Dispatchers.IO) here: RepoDownloader.stagedBytes suspends and runs on
-            // its own dispatcher now, the same way download and abandon already did — see its own
-            // KDoc. Wrapping it again here would only be redundant, not wrong.
+            // its own dispatcher now, the same way download and abandonStaging already did — see its
+            // own KDoc. Wrapping it again here would only be redundant, not wrong.
             val stagedByRepoId =
                 SAMPLE_CATALOG.associate { it.repoId to realDownloader.stagedBytes(it.repoId, downloadRoot) }
             _uiState.update { state ->
@@ -118,26 +118,27 @@ class SampleViewModel(application: Application) : AndroidViewModel(application) 
 
     /**
      * The Discard action on an `Interrupted` row. Reclaims the staging that row's caption described,
-     * via [RepoDownloader.abandon] — which, per its own doc, never touches a previously committed
-     * copy of the same repo id, only this attempt's staging.
+     * via [RepoDownloader.abandonStaging] — which, per its own doc, never touches a previously
+     * committed copy of the same repo id, only this attempt's staging.
      *
-     * Guarded by [inFlightRepoIds] the same way [runDownload] is: `abandon` and `download` touch the
-     * same staging directory, so a Discard tap racing a Resume tap for the same row is exactly the
-     * concurrent-access case that field already exists to rule out.
+     * Guarded by [inFlightRepoIds] the same way [runDownload] is: `abandonStaging` and `download`
+     * touch the same staging directory, so a Discard tap racing a Resume tap for the same row is
+     * exactly the concurrent-access case that field already exists to rule out.
      */
     fun discard(repoId: String) {
         if (!inFlightRepoIds.add(repoId)) return // already busy for this repo id — see the field's doc
         viewModelScope.launch {
             try {
-                realDownloader.abandon(repoId, downloadRoot).fold(
+                realDownloader.abandonStaging(repoId, downloadRoot).fold(
                     onSuccess = { setRowState(repoId, DownloadState.Available) },
                     onFailure = { error -> setRowState(repoId, error.toDownloadState()) },
                 )
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                // abandon() converts every failure it anticipates into Result.failure; this is the
-                // sample's own safety net against whatever it does not — see runDownload's own catch.
+                // abandonStaging() converts every failure it anticipates into Result.failure; this is
+                // the sample's own safety net against whatever it does not — see runDownload's own
+                // catch.
                 setRowState(repoId, DownloadState.Failed(e.message ?: e::class.java.simpleName))
             } finally {
                 inFlightRepoIds.remove(repoId)

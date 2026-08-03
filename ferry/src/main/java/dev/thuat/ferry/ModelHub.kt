@@ -21,7 +21,7 @@ data class RemoteFile(
     /**
      * Checked unconditionally against what lands on disk, by both `RepoDownloader.download()` and
      * `isSatisfiedBy` — including when this is `0`, which is a real assertion that the file is empty,
-     * not a sentinel for "size unknown" (docs/known-limitations.md). A third-party `ModelRepo` that
+     * not a sentinel for "size unknown" (docs/known-limitations.md). A third-party `ModelHub` that
      * cannot report a real size for some file has no way to opt out of this check.
      */
     val sizeBytes: Long,
@@ -40,7 +40,15 @@ data class RepoManifest(
  * A model hub. Implemented per host, because HuggingFace and ModelScope describe repositories
  * differently while the download mechanics are identical.
  */
-interface ModelRepo {
+interface ModelHub {
 
+    /**
+     * Implementations should report failure as `Result.failure(IOException)` — an `IOException` or one
+     * of its subtypes — not an arbitrary `Throwable`, and should not throw out of this function at all.
+     * `RepoDownloader.download()` normalises either violation rather than trusting it (wrapping a
+     * non-`IOException` failure, and catching a throw), so a misbehaving implementation cannot crash a
+     * caller — but the normalised result carries less information than reporting it correctly in the
+     * first place would have.
+     */
     suspend fun manifest(repoId: String): Result<RepoManifest>
 }
