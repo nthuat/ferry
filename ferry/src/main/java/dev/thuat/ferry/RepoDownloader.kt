@@ -429,6 +429,26 @@ class RepoDownloader(
                 return@withContext Result.failure(IOException("cannot record $repoId as committed"))
             }
 
+            // Final check, immediately before the rename that publishes this repo. Cheap on purpose:
+            // one File.length() per manifest file, no hashing — every byte was already verified once
+            // by the loop above, and re-reading gigabytes here would be the wrong trade. The only
+            // thing this catches is staging changing *after* the loop already verified it, which the
+            // loop itself has no way to see: `abandonStaging` racing this call deletes exactly the
+            // files the loop already verified and moved past (docs/known-limitations.md), and two
+            // concurrent `download` calls for the same repo id can do the same to each other. Either
+            // way, without this check the commit below still finds everything *it* looks at correct —
+            // it looked at every file before the race landed — and publishes a repo silently missing
+            // whatever vanished, as Result.success. This turns that into a clean Result.failure
+            // instead, with nothing committed.
+            val corrupted = manifest.files.firstOrNull { file ->
+                resolveInside(stagingDir, file.path).length() != file.sizeBytes
+            }
+            if (corrupted != null) {
+                return@withContext Result.failure(
+                    VerificationException(corrupted.path, "missing or wrong size immediately before commit"),
+                )
+            }
+
             target.parentFile?.mkdirs()
             if (!stagingDir.renameTo(target)) {
                 return@withContext Result.failure(IOException("cannot commit $target"))
@@ -472,19 +492,25 @@ class RepoDownloader(
      * deleting staging on failure so a retry can resume from it; this is what reclaims the bytes when
      * no retry is coming.
      *
-     * **Not safe to call concurrently with [download] for the same [repoId] and [into].** `download`
-     * recreates whatever directories it needs as it goes (`destination.parentFile?.mkdirs()`) and
-     * verifies only the one file it is currently fetching — never a file a previous iteration of the
-     * same attempt already verified and moved past. An `abandonStaging` landing mid-loop deletes
-     * exactly those already-verified files out from under it; the loop has no way to notice and does
-     * not re-fetch them, so every later file still verifies fine on its own, the commit at the end of
-     * `download` still finds everything *it* checked present and correct, and `stagingDir.renameTo`
-     * still succeeds. The result is `Result.success`, publishing a repo silently missing every file
-     * downloaded before the `abandonStaging` landed — a committed partial model, not a failure either
-     * call could detect or report. Serialising `abandonStaging` against `download` for the same repo
-     * id is the caller's responsibility, the same way two concurrent `download` calls are (see
-     * `download`'s own KDoc and docs/known-limitations.md's concurrency entry) — nothing here enforces
-     * it.
+     * **Not safe to call concurrently with [download] for the same [repoId] and [into] — but no longer
+     * unsafe in the way that used to matter most.** `download` recreates whatever directories it needs
+     * as it goes (`destination.parentFile?.mkdirs()`) and verifies only the one file it is currently
+     * fetching — never a file a previous iteration of the same attempt already verified and moved
+     * past. An `abandonStaging` landing mid-loop deletes exactly those already-verified files out from
+     * under it, and the loop has no way to notice or re-fetch them. What that used to cost: every
+     * later file still verified fine on its own, `download`'s own commit found everything *it* checked
+     * present and correct, and `stagingDir.renameTo` still succeeded — `Result.success`, publishing a
+     * repo silently missing every file downloaded before `abandonStaging` landed. `download`'s own
+     * final pre-commit check, immediately before that rename, now re-confirms every manifest file is
+     * still present at its declared size right before the rename — exactly what a mid-loop
+     * `abandonStaging` breaks — so this race now ends in a clean `Result.failure` with
+     * nothing committed, never a silent partial model. Still not something to rely on instead of
+     * serialising: the loser's network transfer and disk writes are wasted rather than avoided, and
+     * this says nothing about two concurrent `download` calls corrupting each other's writes to a
+     * shared file, which is a different hazard this check does not touch (see `download`'s own KDoc
+     * and docs/known-limitations.md's concurrency entry). Serialising `abandonStaging` against
+     * `download` for the same repo id remains the caller's responsibility; nothing here enforces it,
+     * only detects the damage this one specific race used to cause.
      *
      * Deletes only [repoId]'s own staging directory under `into/.staging`, resolved through the same
      * [stagingDirFor] helper [download] uses to compute its own `stagingDir` — shared rather than

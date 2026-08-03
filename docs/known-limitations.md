@@ -124,23 +124,36 @@ Two concurrent `download()` calls for the same repo id into the same directory s
 and write into it independently — interleaved writes to the same destination file are a corruption
 risk on their own, before either call reaches its commit step. Whichever commits first renames
 staging onto `target`; if the other still holds open descriptors into it, its writes follow the inode
-into what is now a committed repo. If the second call reaches its own commit afterward, `target`'s
-marker still names the same repo id — both calls share it — so the guard against replacing a
-directory this method did not write does not catch this either: the second call deletes the first's
-freshly committed repo and renames its own version over it.
+into what is now a committed repo — nothing left running in the first call's own `download` to notice,
+since it already returned. If the second call reaches its own commit afterward, `target`'s marker
+still names the same repo id — both calls share it — so the guard against replacing a directory this
+method did not write does not catch this either: the second call deletes the first's freshly committed
+repo and renames its own version over it. The pre-commit check below stops that second version from
+being silently incomplete — its own staging can be left missing files the same way `abandonStaging`
+leaves it missing files, and is checked the same way — but does not stop the first call's already-
+committed repo from being deleted to make room for it, and does not touch the open-descriptor
+corruption in the previous sentence at all: that damage lands after the corrupting call's own
+`download` has already returned, with nothing left running on that side to check anything against.
 
 Documented on `download`'s KDoc. Serialising is the caller's responsibility.
 
-**The same is true of `abandonStaging` racing `download` for the same repo id — precisely, not just in
-spirit.** `download`'s loop recreates whatever directories it needs as it goes and verifies only the
-one file it is currently fetching, never one a previous iteration already verified and moved past. An
-`abandonStaging` landing mid-loop deletes exactly those already-verified files out from under it; the
-loop does not know, does not re-fetch them, and every file it checks afterward still verifies fine on
-its own — so the commit at the end still succeeds. The consequence is not a failure either call could
-detect: it is `Result.success`, publishing a repo silently missing every file downloaded before the
-`abandonStaging` landed. Serialising `abandonStaging` against `download` for the same repo id is the
-caller's responsibility, documented on `abandonStaging`'s own KDoc; nothing here enforces it, and no
-locking is added for it — the fix for this entry is the sentence you are reading, not code.
+**Closed, for the specific failure this used to cause silently: `abandonStaging` racing `download` for
+the same repo id — precisely, not just in spirit.** `download`'s loop recreates whatever directories it
+needs as it goes and verifies only the one file it is currently fetching, never one a previous
+iteration already verified and moved past. An `abandonStaging` landing mid-loop deletes exactly those
+already-verified files out from under it; the loop does not know and does not re-fetch them. What that
+used to cost: every file the loop checks afterward still verifies fine on its own, so the commit at the
+end still found everything *it* looked at present and correct — `Result.success`, publishing a repo
+silently missing every file downloaded before `abandonStaging` landed, a failure neither call could
+detect. `download` now runs one final check immediately before `stagingDir.renameTo(target)`: for every
+file the manifest declares, `resolveInside(stagingDir, it.path).length() != it.sizeBytes` fails the
+download. One `stat` per file, no hashing — every byte was already verified once by the loop above, so
+this only needs to catch a file *going missing after* that, which the loop itself cannot see. A file
+`abandonStaging` deleted mid-loop is exactly that, so this race now ends in a clean `Result.failure`
+with nothing committed, never the silent partial model above. The same check also catches the same
+shape of gap in a second concurrent `download` call's own staging (next paragraph) — but not the
+open-file-descriptor corruption that paragraph describes, and not which of two concurrent calls "wins":
+serialising remains the caller's responsibility for both; documented on `abandonStaging`'s own KDoc.
 
 **Narrowed for one caller: `:ferry-work`'s `enqueueRepoDownload`.** `:ferry` itself has no enqueue
 step to serialise at — a plain method call has nothing to deduplicate against. `:ferry-work`, the

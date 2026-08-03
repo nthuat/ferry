@@ -236,6 +236,40 @@ class RepoDownloaderTest {
     }
 
     /**
+     * The race this guards against: `abandonStaging`, or a second concurrent `download` call, can
+     * remove a file after this loop already verified it and moved on — the loop has no way to notice,
+     * so without a final check the commit below would still find everything *it* looks at correct and
+     * publish a repo silently missing whatever vanished. Deleting the first file from staging once the
+     * *second* file's `Verifying` event fires reproduces exactly that shape without a second coroutine:
+     * by then the loop has already checked and moved past the first file, the same way a real race
+     * would leave it.
+     */
+    @Test
+    fun `a file that vanishes from staging after being verified fails the download instead of committing`() {
+        val files = listOf(
+            remote("config.json", configBody.length.toLong()),
+            remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)),
+        )
+        server.enqueue(MockResponse().setBody(configBody))
+        server.enqueue(MockResponse().setBody(weightsBody))
+
+        val result = runBlocking {
+            downloaderFor(files).download("a/b", temp.root) { progress ->
+                if (progress is RepoProgress.Verifying && progress.path == "model.bin") {
+                    assertTrue(
+                        "setup: the first file must still be staged when it is removed",
+                        File(temp.root, ".staging/a/b.d/config.json").delete(),
+                    )
+                }
+            }
+        }
+
+        assertTrue("a file removed after the loop already verified it must fail, not commit", result.isFailure)
+        assertTrue(result.exceptionOrNull() is VerificationException)
+        assertFalse("nothing must be committed to the target directory", File(temp.root, "a/b").exists())
+    }
+
+    /**
      * `files.all {}` on an empty list is true, so an empty manifest made the cache check vacuously
      * true for any directory that happened to be sitting at the target path — returning
      * Result.success pointing at something Ferry never wrote. With nothing there it fails the other
