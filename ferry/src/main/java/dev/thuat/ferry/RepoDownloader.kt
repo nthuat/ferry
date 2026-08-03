@@ -489,6 +489,15 @@ class RepoDownloader(
      * moment the next attempt asks, and a `.part` with no validator restarts from zero regardless of
      * what this number said.
      *
+     * "Cheap" is an argument against hashing, not against blocking a caller's thread: an unbounded
+     * [File.walkTopDown] over however many files a repo has staged is still blocking file I/O, and
+     * this was the one non-suspend public method on this class, running that walk directly on
+     * whatever thread called it. It now `suspend`s and runs on [dispatcher], the same one [download]
+     * and [abandon] already use, rather than asking every caller to know to move it off their own
+     * thread by hand — which the sample app's own `SampleViewModel` was doing with a manual
+     * `withContext(Dispatchers.IO)` around this exact call, direct evidence the shape belonged here
+     * instead.
+     *
      * **Total, not `Result`-returning.** An absent, unreadable, or otherwise unusable staging
      * directory is zero bytes of progress, not an error: there is nothing for a caller to react to
      * beyond "no progress to resume", so a `Result` would only make every call site unwrap a failure
@@ -511,28 +520,30 @@ class RepoDownloader(
      *   (`target/[MARKER_FILE]`, still sitting in staging in the narrow window before the rename)
      *   contributes nothing either, for the same reason.
      */
-    fun stagedBytes(repoId: String, into: File): Long = try {
-        val stagingDir = stagingDirFor(File(into, ".staging"), repoId)
-        val marker = File(stagingDir, MARKER_FILE)
-        if (!stagingDir.isDirectory) {
-            0L
-        } else {
-            stagingDir.walkTopDown()
-                .filter { it.isFile && it != marker }
-                .sumOf { staged ->
-                    when {
-                        staged.name.endsWith(".validator") -> 0L
-                        staged.name.endsWith(".part") -> {
-                            val validator =
-                                File(staged.parentFile, "${staged.name.removeSuffix(".part")}.validator")
-                            if (validator.isFile) staged.length() else 0L
+    suspend fun stagedBytes(repoId: String, into: File): Long = withContext(dispatcher) {
+        try {
+            val stagingDir = stagingDirFor(File(into, ".staging"), repoId)
+            val marker = File(stagingDir, MARKER_FILE)
+            if (!stagingDir.isDirectory) {
+                0L
+            } else {
+                stagingDir.walkTopDown()
+                    .filter { it.isFile && it != marker }
+                    .sumOf { staged ->
+                        when {
+                            staged.name.endsWith(".validator") -> 0L
+                            staged.name.endsWith(".part") -> {
+                                val validator =
+                                    File(staged.parentFile, "${staged.name.removeSuffix(".part")}.validator")
+                                if (validator.isFile) staged.length() else 0L
+                            }
+                            else -> staged.length()
                         }
-                        else -> staged.length()
                     }
-                }
+            }
+        } catch (e: IOException) {
+            0L
         }
-    } catch (e: IOException) {
-        0L
     }
 
     /**

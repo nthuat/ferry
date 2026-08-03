@@ -83,9 +83,11 @@ class SampleViewModel(application: Application) : AndroidViewModel(application) 
      */
     init {
         viewModelScope.launch {
-            val stagedByRepoId = withContext(Dispatchers.IO) {
+            // No withContext(Dispatchers.IO) here: RepoDownloader.stagedBytes suspends and runs on
+            // its own dispatcher now, the same way download and abandon already did — see its own
+            // KDoc. Wrapping it again here would only be redundant, not wrong.
+            val stagedByRepoId =
                 SAMPLE_CATALOG.associate { it.repoId to realDownloader.stagedBytes(it.repoId, downloadRoot) }
-            }
             _uiState.update { state ->
                 state.copy(
                     rows = state.rows.map { row ->

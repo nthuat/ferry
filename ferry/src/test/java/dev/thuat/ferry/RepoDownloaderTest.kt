@@ -1195,7 +1195,7 @@ class RepoDownloaderTest {
 
     @Test
     fun `stagedBytes is zero when nothing has ever been staged`() {
-        assertEquals(0L, downloaderFor(emptyList()).stagedBytes("a/b", temp.root))
+        assertEquals(0L, runBlocking { downloaderFor(emptyList()).stagedBytes("a/b", temp.root) })
     }
 
     /** A `.part` with a validator is exactly what `ResumableDownloader` resumes from — see its own KDoc. */
@@ -1207,7 +1207,7 @@ class RepoDownloaderTest {
         }
         File(temp.root, ".staging/a/b.d/model.bin.validator").writeText("\"v1\"")
 
-        assertEquals(8L, downloaderFor(emptyList()).stagedBytes("a/b", temp.root))
+        assertEquals(8L, runBlocking { downloaderFor(emptyList()).stagedBytes("a/b", temp.root) })
     }
 
     /**
@@ -1222,7 +1222,7 @@ class RepoDownloaderTest {
             writeText("12345678")
         }
 
-        assertEquals(0L, downloaderFor(emptyList()).stagedBytes("a/b", temp.root))
+        assertEquals(0L, runBlocking { downloaderFor(emptyList()).stagedBytes("a/b", temp.root) })
     }
 
     /**
@@ -1237,7 +1237,10 @@ class RepoDownloaderTest {
             writeText(configBody)
         }
 
-        assertEquals(configBody.length.toLong(), downloaderFor(emptyList()).stagedBytes("a/b", temp.root))
+        assertEquals(
+            configBody.length.toLong(),
+            runBlocking { downloaderFor(emptyList()).stagedBytes("a/b", temp.root) },
+        )
     }
 
     @Test
@@ -1253,7 +1256,7 @@ class RepoDownloaderTest {
         File(temp.root, ".staging/a/b.d/other.bin.part").writeText("not credited, no validator")
 
         val expected = configBody.length.toLong() + 8L
-        assertEquals(expected, downloaderFor(emptyList()).stagedBytes("a/b", temp.root))
+        assertEquals(expected, runBlocking { downloaderFor(emptyList()).stagedBytes("a/b", temp.root) })
         assertEquals("must not touch the network", 0, server.requestCount)
     }
 
@@ -1269,13 +1272,16 @@ class RepoDownloaderTest {
         }
         File(temp.root, ".staging/a/b.d/.ferry").writeText("a/b")
 
-        assertEquals(configBody.length.toLong(), downloaderFor(emptyList()).stagedBytes("a/b", temp.root))
+        assertEquals(
+            configBody.length.toLong(),
+            runBlocking { downloaderFor(emptyList()).stagedBytes("a/b", temp.root) },
+        )
     }
 
     /** Total, not `Result`-returning: an escaping repo id is zero bytes of progress, not a thrown exception. */
     @Test
     fun `stagedBytes is zero rather than throwing for an escaping repo id`() {
-        assertEquals(0L, downloaderFor(emptyList()).stagedBytes("../..", temp.root))
+        assertEquals(0L, runBlocking { downloaderFor(emptyList()).stagedBytes("../..", temp.root) })
     }
 
     /**
@@ -1292,7 +1298,7 @@ class RepoDownloaderTest {
         val result = runBlocking { downloader.download("a/b", temp.root) }
 
         assertTrue(result.isFailure)
-        assertEquals(5L, downloader.stagedBytes("a/b", temp.root))
+        assertEquals(5L, runBlocking { downloader.stagedBytes("a/b", temp.root) })
     }
 
     /**
@@ -1329,7 +1335,7 @@ class RepoDownloaderTest {
         server.enqueue(MockResponse().setBody(weightsBody.take(5)))
         val modelResult = runBlocking { modelDownloader.download("owner/model", temp.root) }
         assertTrue(modelResult.isFailure)
-        assertEquals(5L, modelDownloader.stagedBytes("owner/model", temp.root))
+        assertEquals(5L, runBlocking { modelDownloader.stagedBytes("owner/model", temp.root) })
 
         val ownerFiles = listOf(remote("config.json", configBody.length.toLong()))
         server.enqueue(MockResponse().setBody(configBody))
@@ -1338,7 +1344,7 @@ class RepoDownloaderTest {
         assertEquals(
             "an unrelated prefix repo's own download must not prune owner/model's progress",
             5L,
-            modelDownloader.stagedBytes("owner/model", temp.root),
+            runBlocking { modelDownloader.stagedBytes("owner/model", temp.root) },
         )
         assertFalse(
             "owner/model must never appear inside the committed owner directory",
@@ -1372,7 +1378,7 @@ class RepoDownloaderTest {
         assertEquals(
             "abandoning a prefix repo id must not delete a nested repo's own staging",
             5L,
-            modelDownloader.stagedBytes("owner/model", temp.root),
+            runBlocking { modelDownloader.stagedBytes("owner/model", temp.root) },
         )
     }
 
@@ -1395,7 +1401,7 @@ class RepoDownloaderTest {
         assertEquals(
             "must not sum a nested id's own staged bytes into the prefix id's count",
             3L,
-            ownerDownloader.stagedBytes("owner", temp.root),
+            runBlocking { ownerDownloader.stagedBytes("owner", temp.root) },
         )
     }
 }
