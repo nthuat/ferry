@@ -17,7 +17,7 @@ import dev.thuat.ferry.RepoProgress
  * than `:sample`'s 100 ms — a database write and a `NotificationManager` call both cost more than
  * a Compose recomposition, and nobody reads a background download's notification at 10 Hz.
  */
-class RepoDownloadThrottle(
+internal class RepoDownloadThrottle(
     private val minIntervalMillis: Long = 1_000L,
     private val nowMillis: () -> Long = System::currentTimeMillis,
 ) {
