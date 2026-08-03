@@ -148,8 +148,8 @@ class RepoDownloader(
      * `target`'s marker still names the same repo id, so the guard against replacing a directory
      * this method did not write does not catch this either: the second call deletes the first's
      * freshly committed repo and renames its own version over it. Serialising calls per repo id is
-     * the caller's responsibility; different repo ids are independent. See also [abandon]'s own KDoc
-     * for the same hazard between `abandon` and `download`.
+     * the caller's responsibility; different repo ids are independent. See also [abandonStaging]'s
+     * own KDoc for the same hazard between `abandonStaging` and `download`.
      */
     suspend fun download(
         repoId: String,
@@ -182,8 +182,8 @@ class RepoDownloader(
             // as far as it got, on disk, deliberately, so the next attempt can resume from those
             // bytes instead of re-fetching them. Success consumes it — stagingDir.renameTo(target)
             // below moves it out from under this path entirely, so there is nothing left afterward
-            // to clean up. A failure is not cleaned up here; Task 3 adds the explicit abandon() that
-            // reclaims a staging directory the caller has given up on.
+            // to clean up. A failure is not cleaned up here; Task 3 adds the explicit abandonStaging()
+            // that reclaims a staging directory the caller has given up on.
             //
             // stagingDir is not a bare resolveInside(stagingRoot, repoId): "owner" and "owner/model"
             // are both ordinary repo ids (MARKER_FILE's own doc), and staging has no shadow tree the
@@ -440,15 +440,16 @@ class RepoDownloader(
      * **Not safe to call concurrently with [download] for the same [repoId] and [into].** `download`
      * recreates whatever directories it needs as it goes (`destination.parentFile?.mkdirs()`) and
      * verifies only the one file it is currently fetching — never a file a previous iteration of the
-     * same attempt already verified and moved past. An `abandon` landing mid-loop deletes exactly
-     * those already-verified files out from under it; the loop has no way to notice and does not
-     * re-fetch them, so every later file still verifies fine on its own, the commit at the end of
+     * same attempt already verified and moved past. An `abandonStaging` landing mid-loop deletes
+     * exactly those already-verified files out from under it; the loop has no way to notice and does
+     * not re-fetch them, so every later file still verifies fine on its own, the commit at the end of
      * `download` still finds everything *it* checked present and correct, and `stagingDir.renameTo`
      * still succeeds. The result is `Result.success`, publishing a repo silently missing every file
-     * downloaded before the `abandon` landed — a committed partial model, not a failure either call
-     * could detect or report. Serialising `abandon` against `download` for the same repo id is the
-     * caller's responsibility, the same way two concurrent `download` calls are (see `download`'s own
-     * KDoc and docs/known-limitations.md's concurrency entry) — nothing here enforces it.
+     * downloaded before the `abandonStaging` landed — a committed partial model, not a failure either
+     * call could detect or report. Serialising `abandonStaging` against `download` for the same repo
+     * id is the caller's responsibility, the same way two concurrent `download` calls are (see
+     * `download`'s own KDoc and docs/known-limitations.md's concurrency entry) — nothing here enforces
+     * it.
      *
      * Deletes only [repoId]'s own staging directory under `into/.staging`, resolved through the same
      * [stagingDirFor] helper [download] uses to compute its own `stagingDir` — shared rather than
@@ -462,12 +463,13 @@ class RepoDownloader(
      * against, looks at, or touches `into/[repoId]`.** Abandoning an in-progress download says
      * nothing about a previously committed copy of the same repo id, which may be complete, verified,
      * and in use by the host right now. A method named `abandon` that deleted that would be the worst
-     * API in this library.
+     * API in this library — named `abandonStaging` instead, so the one thing it touches is in its own
+     * name.
      *
      * No staging present for [repoId] is success, not failure: the caller asked for a state — this
      * repo's staging reclaimed — and that state already holds.
      */
-    suspend fun abandon(repoId: String, into: File): Result<Unit> = withContext(dispatcher) {
+    suspend fun abandonStaging(repoId: String, into: File): Result<Unit> = withContext(dispatcher) {
         try {
             val stagingRoot = File(into, ".staging")
             val stagingDir = stagingDirFor(stagingRoot, repoId)
@@ -498,8 +500,8 @@ class RepoDownloader(
      * [File.walkTopDown] over however many files a repo has staged is still blocking file I/O, and
      * this was the one non-suspend public method on this class, running that walk directly on
      * whatever thread called it. It now `suspend`s and runs on [dispatcher], the same one [download]
-     * and [abandon] already use, rather than asking every caller to know to move it off their own
-     * thread by hand — which the sample app's own `SampleViewModel` was doing with a manual
+     * and [abandonStaging] already use, rather than asking every caller to know to move it off their
+     * own thread by hand — which the sample app's own `SampleViewModel` was doing with a manual
      * `withContext(Dispatchers.IO)` around this exact call, direct evidence the shape belonged here
      * instead.
      *
@@ -727,7 +729,7 @@ class RepoDownloader(
      * repo's own in-flight scratch: `resolveInside(stagingRoot, "owner")` was a literal ancestor
      * directory of `resolveInside(stagingRoot, "owner/model")`, so [pruneOrphans] walking "owner"'s
      * staging walked straight into "owner/model"'s live `.part` files and deleted them as orphans of
-     * a manifest that was never theirs — [abandon] and [stagedBytes] reached the same way, via
+     * a manifest that was never theirs — [abandonStaging] and [stagedBytes] reached the same way, via
      * `deleteRecursively()` and a recursive sum respectively. The emptied nested directory then rode
      * `stagingDir.renameTo(target)` straight into the committed repo, because [pruneOrphans] only
      * ever deletes files (tracked separately; see its own doc).

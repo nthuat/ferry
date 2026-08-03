@@ -1160,7 +1160,7 @@ class RepoDownloaderTest {
     }
 
     @Test
-    fun `abandon removes only this repo's staging`() {
+    fun `abandonStaging removes only this repo's staging`() {
         val mine = File(temp.root, ".staging/a/b.d/model.bin.part").apply {
             parentFile?.mkdirs()
             writeText("mine")
@@ -1170,7 +1170,7 @@ class RepoDownloaderTest {
             writeText("other")
         }
 
-        val result = runBlocking { downloaderFor(emptyList()).abandon("a/b", temp.root) }
+        val result = runBlocking { downloaderFor(emptyList()).abandonStaging("a/b", temp.root) }
 
         assertTrue(result.isSuccess)
         assertFalse(mine.exists())
@@ -1180,17 +1180,18 @@ class RepoDownloaderTest {
     /**
      * The property the KDoc calls out by name: abandoning an in-progress download says nothing
      * about a previously committed copy of the same repo id, which may be complete, verified, and in
-     * use by the host right now. `abandon` must never resolve against `into` itself, only against
-     * `into/.staging`.
+     * use by the host right now. `abandonStaging` must never resolve against `into` itself, only
+     * against `into/.staging`.
      *
      * Branch review: with only a committed copy and no staging, this used to pass for the wrong
-     * reason — `abandon` found `stagingDir.exists()` false and returned early having done nothing at
-     * all, which would pass identically for a completely broken `abandon` that never deletes
-     * anything. Now stages this same id too, so the assertion on `staged` only passes if `abandon`
-     * actually deletes staging, and the assertion on `committed` only means something once it does.
+     * reason — `abandonStaging` found `stagingDir.exists()` false and returned early having done
+     * nothing at all, which would pass identically for a completely broken `abandonStaging` that
+     * never deletes anything. Now stages this same id too, so the assertion on `staged` only passes
+     * if `abandonStaging` actually deletes staging, and the assertion on `committed` only means
+     * something once it does.
      */
     @Test
-    fun `abandon does not touch an already committed repo`() {
+    fun `abandonStaging does not touch an already committed repo`() {
         val committed = File(temp.root, "a/b/model.bin").apply {
             parentFile?.mkdirs()
             writeText("committed bytes")
@@ -1201,23 +1202,23 @@ class RepoDownloaderTest {
             writeText("in-flight bytes, unrelated to the committed copy above")
         }
 
-        val result = runBlocking { downloaderFor(emptyList()).abandon("a/b", temp.root) }
+        val result = runBlocking { downloaderFor(emptyList()).abandonStaging("a/b", temp.root) }
 
         assertTrue(result.isSuccess)
-        assertFalse("abandon must actually delete this repo id's own staging", staged.exists())
+        assertFalse("abandonStaging must actually delete this repo id's own staging", staged.exists())
         assertTrue("abandoning a download says nothing about a completed one", committed.exists())
         assertEquals("committed bytes", committed.readText())
     }
 
     /**
-     * repoId is caller-supplied, same as in [download]; `abandon` must refuse the same escapes
+     * repoId is caller-supplied, same as in [download]; `abandonStaging` must refuse the same escapes
      * rather than trust its own, separate reasoning about what's safe.
      */
     @Test
-    fun `abandon cannot escape into`() {
+    fun `abandonStaging cannot escape into`() {
         val outside = File(temp.root, "outside.txt").apply { writeText("not yours") }
 
-        val result = runBlocking { downloaderFor(emptyList()).abandon("../..", temp.root) }
+        val result = runBlocking { downloaderFor(emptyList()).abandonStaging("../..", temp.root) }
 
         assertTrue(result.isFailure)
         assertTrue(outside.exists())
@@ -1225,8 +1226,10 @@ class RepoDownloaderTest {
 
     /** The caller asked for a state — no staging for this repo id — that already holds. */
     @Test
-    fun `abandoning a repo with no staging succeeds`() {
-        assertTrue(runBlocking { downloaderFor(emptyList()).abandon("never/started", temp.root) }.isSuccess)
+    fun `abandoning staging for a repo with no staging succeeds`() {
+        assertTrue(
+            runBlocking { downloaderFor(emptyList()).abandonStaging("never/started", temp.root) }.isSuccess,
+        )
     }
 
     @Test
@@ -1396,19 +1399,19 @@ class RepoDownloaderTest {
     }
 
     /**
-     * `abandon` reached a nested id's staging the same way `pruneOrphans` did — via
+     * `abandonStaging` reached a nested id's staging the same way `pruneOrphans` did — via
      * `deleteRecursively()` on a `stagingDir` that used to be a literal ancestor directory of a
      * nested id's own. See `stagingDirFor`'s own doc.
      */
     @Test
-    fun `abandoning a prefix repo does not touch a nested repo's own staging`() {
+    fun `abandoning staging for a prefix repo does not touch a nested repo's own staging`() {
         val modelDownloader = downloaderFor(
             listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody))),
         )
         server.enqueue(MockResponse().setBody(weightsBody.take(5)))
         runBlocking { modelDownloader.download("owner/model", temp.root) }
 
-        val result = runBlocking { downloaderFor(emptyList()).abandon("owner", temp.root) }
+        val result = runBlocking { downloaderFor(emptyList()).abandonStaging("owner", temp.root) }
 
         assertTrue(result.isSuccess)
         assertEquals(

@@ -99,7 +99,7 @@ honest part. A dropped connection is recovered from mid-attempt via `Range`. A f
 verifying — from this attempt or an earlier one — is not fetched again. Staging itself is durable: a
 failed attempt, a cancellation, or the process dying all leave it exactly as far as it got, and nothing
 deletes it until either a later `download` call consumes it by committing the repo, or the caller
-explicitly calls `abandon` because no retry is coming. A second `download` call for the same repo id —
+explicitly calls `abandonStaging` because no retry is coming. A second `download` call for the same repo id —
 even from a fresh process — resumes from whatever is already on disk instead of restarting from zero,
 and `stagedBytes(repoId, into)` lets a caller detect there is something to resume before calling
 `download` at all, the number behind a "Resume, N already downloaded" row.
