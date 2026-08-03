@@ -244,6 +244,11 @@ class RepoDownloadWorker(
 
         is RepoProgress.Verifying -> workDataOf(KEY_PHASE to PHASE_VERIFYING)
 
+        // No dedicated phase for "already had it" — reuses PHASE_VERIFYING, the same shape of
+        // event: a brief, non-transferring per-file check. Add PHASE_SKIPPED only if a host needs
+        // to tell the two apart.
+        is RepoProgress.Skipped -> workDataOf(KEY_PHASE to PHASE_VERIFYING)
+
         is RepoProgress.Complete -> workDataOf(KEY_PHASE to PHASE_COMPLETE)
     }
 

@@ -4,8 +4,9 @@ Downloads AI model repositories to Android devices, and refuses to do it badly.
 
 > **Status: core works.** Fetches a HuggingFace, ModelScope or Ollama repo, refuses to start without
 > the disk space to finish it, and verifies every published SHA-256 before committing anything.
-> Backgrounding is available as the optional `:ferry-work` module (see below); pause and
-> resume-across-launch are not done. Not published to Maven.
+> Backgrounding is available as the optional `:ferry-work` module (see below); a failed or
+> interrupted download resumes across process death — pause is the one still not done. Not published
+> to Maven.
 
 ```kotlin
 val ferry = Ferry.huggingFace()
@@ -76,16 +77,26 @@ Not a feature list. Promises the implementation holds and the tests enforce.
 | 1 | **Never a partial model** | files land one by one and a loader picks up a half-written repo |
 | 2 | **Never a corrupt model** | trusting a `200`, or verifying against the wrong hash |
 | 3 | **Never starts what can't finish** | 4 GB model onto 3 GB free, failing at 91% |
-| 4 | **Resumable within one download attempt** | progress kept in memory, or keyed to a version code |
+| 4 | **Resumable across a dropped connection, a failed attempt, or the process dying** | a multi-gigabyte download restarting from byte zero after a kill or a crash |
 
 Guarantee 3 is the one neither reference implementation has.
 
-Guarantee 4 is scoped, and the scope is the honest part. A dropped connection is recovered from
-mid-attempt via `Range`, and a file already on disk and verifying is not fetched again. Resume across
-process death is **not** implemented: the staging directory is deleted in a `finally` block so a
-failure can never leave a half-repo behind, which forfeits the partial files with it. A failed
-attempt therefore restarts from byte zero. Making both true at once needs persisted state and is a
-later phase.
+Guarantee 4 covers more ground than "resumable" usually means, and what remains out of scope is the
+honest part. A dropped connection is recovered from mid-attempt via `Range`. A file already staged and
+verifying — from this attempt or an earlier one — is not fetched again. Staging itself is durable: a
+failed attempt, a cancellation, or the process dying all leave it exactly as far as it got, and nothing
+deletes it until either a later `download` call consumes it by committing the repo, or the caller
+explicitly calls `abandon` because no retry is coming. A second `download` call for the same repo id —
+even from a fresh process — resumes from whatever is already on disk instead of restarting from zero,
+and `stagedBytes(repoId, into)` lets a caller detect there is something to resume before calling
+`download` at all, the number behind a "Resume, N already downloaded" row.
+
+What is still out of scope is deliberate **pause**: stopping a download mid-flight and recording that
+it was intentional rather than a failure needs cooperative cancellation threaded through the transfer
+loop, which nothing here does yet — coroutine cancellation already stops a transfer, but nothing
+records why it stopped. And resume is only ever as good as the hub's own validator: a `.part` with no
+`ETag`/`Last-Modified` from the server restarts that one file from byte zero rather than risk resuming
+onto content that changed underneath it.
 
 ## Three things about HuggingFace worth knowing
 
@@ -323,8 +334,13 @@ WorkManager.getInstance(context)
 Ferry moves bytes; it never decides what your users read while it does.
 
 Enqueueing the same repo id twice is a no-op rather than a race — the second call keeps the running
-work instead of replacing it, because replacing would cancel a download whose `finally` then deletes
-the staging directory the replacement is about to write into.
+work instead of replacing it. Replacing it would cancel the in-flight `download` call, and coroutine
+cancellation is cooperative: it stops at the next checkpoint, not instantly, so a replacement's own
+`download` call could start writing into the same staging directory while the cancelled one's last
+write is still landing — the same concurrent-download hazard `download`'s own KDoc already warns
+against for two ordinary calls, self-inflicted here by cancelling one enqueue's work out from under
+the request that is about to replace it. `KEEP` avoids that by never starting the second call at all
+while the first is still running.
 
 ### Why a separate module, not a feature of `:ferry`
 

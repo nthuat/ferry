@@ -23,6 +23,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -42,6 +43,7 @@ fun SampleScreen(
     state: SampleUiState,
     onDownload: (String) -> Unit,
     onRecheck: (String) -> Unit,
+    onDiscard: (String) -> Unit,
     onToggleLowDisk: (Boolean) -> Unit,
     onCorruptFile: () -> Unit,
     modifier: Modifier = Modifier,
@@ -62,6 +64,7 @@ fun SampleScreen(
                     row = row,
                     onDownload = { onDownload(row.catalog.repoId) },
                     onRecheck = { onRecheck(row.catalog.repoId) },
+                    onDiscard = { onDiscard(row.catalog.repoId) },
                 )
             }
         }
@@ -80,7 +83,10 @@ private val ROW_MIN_HEIGHT = 96.dp
 
 // Generous rather than measured exactly: M3's default Button content padding is 24.dp per side, and
 // this needs headroom for "Download"/"Re-check" at any device font scale, not just a default one.
-private val ACTION_SLOT_WIDTH = 120.dp
+// Widened from 120.dp to fit Interrupted's two side-by-side actions (Resume + Discard, each given
+// tighter contentPadding than the default — see ActionControl) at the same headroom — one constant
+// for every state, since the row's own no-resize rule means this slot cannot be sized per state.
+private val ACTION_SLOT_WIDTH = 176.dp
 private val ACTION_SLOT_HEIGHT = 40.dp
 private val PROGRESS_HEIGHT = 4.dp
 
@@ -94,6 +100,7 @@ fun ModelRowCard(
     row: ModelRow,
     onDownload: () -> Unit,
     onRecheck: () -> Unit,
+    onDiscard: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Card(modifier = modifier.fillMaxWidth().heightIn(min = ROW_MIN_HEIGHT)) {
@@ -114,7 +121,7 @@ fun ModelRowCard(
                     modifier = Modifier.size(width = ACTION_SLOT_WIDTH, height = ACTION_SLOT_HEIGHT),
                     contentAlignment = Alignment.Center,
                 ) {
-                    ActionControl(row.state, onDownload = onDownload, onRecheck = onRecheck)
+                    ActionControl(row.state, onDownload = onDownload, onRecheck = onRecheck, onDiscard = onDiscard)
                 }
             }
             Spacer(Modifier.height(8.dp))
@@ -123,8 +130,16 @@ fun ModelRowCard(
     }
 }
 
+/** Tighter than M3's default `ButtonDefaults.ContentPadding` (24.dp horizontal) — see ACTION_SLOT_WIDTH's own doc. */
+private val COMPACT_ACTION_PADDING = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+
 @Composable
-private fun ActionControl(state: DownloadState, onDownload: () -> Unit, onRecheck: () -> Unit) {
+private fun ActionControl(
+    state: DownloadState,
+    onDownload: () -> Unit,
+    onRecheck: () -> Unit,
+    onDiscard: () -> Unit,
+) {
     when (state) {
         is DownloadState.Available, is DownloadState.Failed ->
             Button(onClick = onDownload) { Text("Download") }
@@ -135,6 +150,18 @@ private fun ActionControl(state: DownloadState, onDownload: () -> Unit, onRechec
 
         is DownloadState.Downloaded ->
             OutlinedButton(onClick = onRecheck) { Text("Re-check") }
+
+        // onDownload, not a separate "resume" callback: download() already resumes from whatever
+        // staging holds (that is this whole plan's point), so Resume asks for exactly the same call
+        // Available's own Download button makes. The label says "Resume" because the caption already
+        // told the user bytes are staged; the call underneath does not need its own identity to match.
+        is DownloadState.Interrupted -> Row(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(onClick = onDiscard, contentPadding = COMPACT_ACTION_PADDING) { Text("Discard") }
+            Button(onClick = onDownload, contentPadding = COMPACT_ACTION_PADDING) { Text("Resume") }
+        }
 
         DownloadState.CheckingSpace, is DownloadState.Downloading, is DownloadState.Verifying -> Unit
     }
@@ -160,6 +187,13 @@ private val DownloadState.Downloading.fraction: Float
 
 private fun captionFor(state: DownloadState, catalog: ModelCatalogEntry): String = when (state) {
     DownloadState.Available -> "${catalog.fileCount} files · ${catalog.sizeLabel}"
+
+    // catalog is deliberately unused here, unlike Available above: it is static catalog copy, and
+    // state.stagedBytes is instead a real number this app read from Ferry's own staging (see
+    // DownloadState.Interrupted's doc). Says only what is already on disk, never what Resume is
+    // guaranteed to transfer — a `.part` with no validator restarts that file from zero regardless,
+    // and this caption must not claim otherwise.
+    is DownloadState.Interrupted -> "Interrupted — ${formatBytes(state.stagedBytes)} staged from a previous attempt"
 
     DownloadState.CheckingSpace -> "Checking free space…"
 
@@ -272,6 +306,7 @@ private fun SampleScreenPreview() {
                 state = SampleUiState(rows = rows, sabotage = SabotageState(lowDiskSimulationEnabled = true)),
                 onDownload = {},
                 onRecheck = {},
+                onDiscard = {},
                 onToggleLowDisk = {},
                 onCorruptFile = {},
             )
@@ -284,6 +319,7 @@ private fun SampleScreenPreview() {
 private fun ModelRowStatesPreview() {
     val states = listOf(
         DownloadState.Available,
+        DownloadState.Interrupted(1_800_000L),
         DownloadState.CheckingSpace,
         DownloadState.WontFit(5_632_417_295, 1_000_000, 5_631_417_295),
         DownloadState.Downloading(2, 9, "pytorch_model.bin", 1_200_000, 2_514_146),
@@ -299,7 +335,12 @@ private fun ModelRowStatesPreview() {
                 contentPadding = PaddingValues(8.dp),
             ) {
                 items(states) { state ->
-                    ModelRowCard(ModelRow(SAMPLE_CATALOG[0], state), onDownload = {}, onRecheck = {})
+                    ModelRowCard(
+                        ModelRow(SAMPLE_CATALOG[0], state),
+                        onDownload = {},
+                        onRecheck = {},
+                        onDiscard = {},
+                    )
                 }
             }
         }

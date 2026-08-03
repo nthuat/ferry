@@ -4,6 +4,8 @@ import dev.thuat.ferry.InsufficientSpaceException
 import dev.thuat.ferry.RepoProgress
 import dev.thuat.ferry.SpaceReport
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 import java.io.IOException
@@ -54,6 +56,40 @@ class ProgressMappingTest {
         val progress = RepoProgress.Verifying("owner/model", "model.safetensors")
 
         assertEquals(DownloadState.Verifying("model.safetensors"), progress.toDownloadState(sawTransfer = true))
+    }
+
+    @Test
+    fun `skipped maps to the verifying state, carrying the file path`() {
+        val progress = RepoProgress.Skipped("owner/model", "config.json", fileIndex = 0, fileCount = 2)
+
+        assertEquals(DownloadState.Verifying("config.json"), progress.toDownloadState(sawTransfer = false))
+    }
+
+    /**
+     * Branch review: an all-staged resume fires only `Skipped` events, never `Downloading`, but it
+     * still commits staging into the target directory via the same rename a real transfer ends with.
+     * `SampleViewModel.runDownload` used to latch its own `sawTransfer` flag off `Downloading` alone,
+     * so that resume reported `Downloaded(cacheHit = true)` — claiming the free whole-repo shortcut
+     * ran, when what actually happened committed a directory that did not exist, verified, before this
+     * call. `Skipped` must count the same as `Downloading` for that flag to be honest.
+     */
+    @Test
+    fun `marksRealAttempt is true for downloading and skipped, false for every other event`() {
+        val downloading = RepoProgress.Downloading(
+            repoId = "owner/model",
+            path = "model.safetensors",
+            fileIndex = 0,
+            fileCount = 1,
+            bytesWritten = 1L,
+            fileBytes = 2L,
+        )
+        val skipped = RepoProgress.Skipped("owner/model", "config.json", fileIndex = 0, fileCount = 2)
+
+        assertTrue(downloading.marksRealAttempt)
+        assertTrue(skipped.marksRealAttempt)
+        assertFalse(RepoProgress.CheckingSpace("owner/model").marksRealAttempt)
+        assertFalse(RepoProgress.Verifying("owner/model", "config.json").marksRealAttempt)
+        assertFalse(RepoProgress.Complete("owner/model", File("/tmp/owner/model")).marksRealAttempt)
     }
 
     @Test
@@ -137,4 +173,43 @@ class ProgressMappingTest {
 
     /** A named class, deliberately: an anonymous one's `simpleName` is "", which would hide a blank fallback. */
     private class NoMessageException : IOException()
+
+    @Test
+    fun `an available row becomes interrupted once staged bytes are found`() {
+        val state = DownloadState.Available.withStagedBytes(2_400_000L)
+
+        assertEquals(DownloadState.Interrupted(2_400_000L), state)
+    }
+
+    @Test
+    fun `an available row with nothing staged stays available`() {
+        val state = DownloadState.Available.withStagedBytes(0L)
+
+        assertEquals(DownloadState.Available, state)
+    }
+
+    /**
+     * A row already downloading, downloaded, refused, or failed has more current information than a
+     * byte count staged before this attempt was even known about, and must not be clobbered by it —
+     * see `withStagedBytes`' own doc and `SampleViewModel`'s `init` block, which relies on exactly
+     * this to survive a race against a user tapping Download before the staged-bytes check resolves.
+     */
+    @Test
+    fun `a row that is not available is left untouched regardless of staged bytes`() {
+        val downloading = DownloadState.Downloading(
+            fileIndex = 0,
+            fileCount = 1,
+            path = "model.bin",
+            bytesWritten = 10L,
+            fileBytes = 100L,
+        )
+
+        val state = downloading.withStagedBytes(999L)
+
+        assertEquals(
+            "a live state must not be clobbered by a byte count staged before this attempt began",
+            downloading,
+            state,
+        )
+    }
 }

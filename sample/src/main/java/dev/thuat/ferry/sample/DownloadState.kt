@@ -13,10 +13,28 @@ sealed interface DownloadState {
     data object Available : DownloadState
 
     /**
-     * Free space is being checked — a fast, local stat (`File.usableSpace`), not network time: the
-     * manifest has already been fetched by the time this ever fires. Skipped entirely on a cache
-     * hit, which needs no space check at all — a `Downloaded` row can arrive with no `CheckingSpace`
-     * in between (see `ProgressMapping.kt`'s own doc on `toDownloadState`).
+     * Staging survived from an earlier attempt on this repo — a failure, a cancellation, or the
+     * process dying — holding [stagedBytes] this app found reusable via
+     * [dev.thuat.ferry.RepoDownloader.stagedBytes]. Computed once, when `SampleViewModel` is
+     * constructed (see its own doc), not continuously: nothing outside this app touches its staging,
+     * so there is nothing to watch for after that first check.
+     *
+     * [stagedBytes] is not re-verified here any more than `RepoDownloader.stagedBytes` re-verifies it
+     * itself (see that method's own KDoc) — it is a hint, not a promise. The caption this state
+     * renders says only what is staged, never what tapping Resume is guaranteed to transfer: a
+     * `.part` with no validator restarts from zero regardless of what this number says, and this row
+     * must not claim otherwise (see `captionFor`'s handling of this state).
+     */
+    data class Interrupted(val stagedBytes: Long) : DownloadState
+
+    /**
+     * Free space is being checked — never network time, since the manifest has already been fetched
+     * by the time this ever fires, but not only a fast local stat (`File.usableSpace`) either: a
+     * resumed download credits whatever of a file is already staged and correct, and that credit
+     * check re-hashes every such file to decide, so a mostly-resumed multi-gigabyte model can spend
+     * real, visible time here re-reading disk before the first network request. Skipped entirely on
+     * a cache hit, which needs no space check at all — a `Downloaded` row can arrive with no
+     * `CheckingSpace` in between (see `ProgressMapping.kt`'s own doc on `toDownloadState`).
      */
     data object CheckingSpace : DownloadState
 

@@ -37,6 +37,33 @@ So durable staging **cannot** be mistaken for a committed repo, and a committed 
 
 Per-file staleness is already handled and tested: `ResumableDownloader` stores the ETag as a validator, replays it with `If-Range`, and **refuses to resume at all when the server publishes no validator** — a design decision already made because resuming blind risks a corrupt file that is exactly the right size.
 
+### What staging actually contains — corrected during Task 1
+
+This plan was drafted assuming staging holds `.part` files. It holds three kinds of thing, because
+`ResumableDownloader` renames `<file>.part` to `<file>` as soon as **the server's own declared
+length** is satisfied — before `RepoDownloader` has compared anything to the manifest:
+
+| On disk | Meaning |
+|---|---|
+| `<file>.part` | interrupted mid-transfer |
+| `<file>.validator` | the ETag that makes resuming that `.part` safe |
+| `<file>` | the *server* considered it complete. The manifest may still reject it. |
+
+The third case is not an edge case — a short body with a self-consistent `Content-Length` produces
+exactly it, and that is the shape Task 1's own test exercises.
+
+It is also the best news in this plan: a file that downloaded **and verified** is already sitting in
+staging under its final name, so resuming should skip it entirely rather than continue it. That is
+stronger than `.part` continuation.
+
+**The rule every later task must follow:** a staged file under its final name counts as progress only
+if it matches the manifest's declared size and, where a `sha256` is published, its hash. That
+predicate already exists — it is what `isSatisfiedBy` applies per file. A completed-looking file that
+fails verification must never be counted, or resume will skip a corrupt file forever.
+
+Tasks 2, 4 and 5 were written before this was understood and each say "`.part`" where they mean "all
+three". Read them with this table in hand.
+
 ---
 
 ### Task 1: Stop deleting staging on failure
@@ -361,6 +388,65 @@ Expected: FAIL with `InsufficientSpaceException` — the check demanded all ten 
 Expected: PASS. Every existing space test must still pass — in particular the one asserting a genuinely-too-large repo is still refused, and the one asserting a refusal issues no network request. If either needs weakening, stop and report it: a space check that stopped refusing is worse than one that over-reserves.
 
 - [ ] **Step 5: Commit**
+
+---
+
+### Task 4b: Skip a staged file that is already complete and correct
+
+**Files:**
+- Modify: `ferry/src/main/java/dev/thuat/ferry/RepoDownloader.kt`
+- Test: `ferry/src/test/java/dev/thuat/ferry/RepoDownloaderTest.kt`
+
+**Added during execution.** Task 4 surfaced it: crediting a completed staged file toward the space
+check while the download loop still re-fetches it is incoherent, and it is the half of resume that
+actually matters.
+
+**Background:**
+
+The loop calls `downloader.download(url, destination)` for every file in the manifest,
+unconditionally (`RepoDownloader.kt:229`). `ResumableDownloader` decides where to start from
+`part.exists()` alone (`:53`) and never consults the final file — and worse, at `:84` it *deletes* an
+existing final file before writing.
+
+So a repo of ten files where nine completed and verified re-downloads all ten. The nine finished
+files are destroyed and re-fetched. `.part` continuation rescues only the single file that was
+mid-transfer, which is the least valuable part of the progress.
+
+**Fix:** before calling `download` for a file, skip it when the staged copy already satisfies the
+manifest — declared size, and hash where one is published. That is the per-file predicate
+`isSatisfiedBy` applies and Task 4 already reused; use the same one, do not write a third.
+
+Emit progress for a skipped file so a caller can distinguish "already had it" from "fetched it"
+rather than seeing an unexplained jump. Decide which `RepoProgress` shape says that honestly — if
+none does, say so rather than misusing one.
+
+**Do not** touch `ResumableDownloader`. Its `target.delete()` is correct for the case it handles:
+it owns the final rename, and a stale target there would otherwise survive a fresh download. The
+skip belongs one layer up, where the manifest is known.
+
+- [ ] **Step 1: Write the failing test**
+
+A repo of two files. Stage one completed and correct, plus its marker of correctness. Enqueue a
+response for the *other* file only. Assert the download succeeds and `server.requestCount` is 1 —
+the completed file was not re-fetched. Assert on the request count, not only on success: the whole
+claim is about bytes not moving.
+
+- [ ] **Step 2: Run it and watch it fail**
+
+Expected: FAIL — MockWebServer has no queued response for the second request, so the run errors or
+hangs rather than merely mismatching a count.
+
+- [ ] **Step 3: Implement the skip**
+
+- [ ] **Step 4: Run**
+
+- [ ] **Step 5: Prove it cannot skip something it should not**
+
+A staged file whose bytes do **not** match the manifest must still be fetched. Revert the predicate
+to a bare `exists()` check, confirm that test goes red, restore. Skipping on existence alone would
+commit a corrupt file, which is guarantee 2.
+
+- [ ] **Step 6: Commit**
 
 ---
 

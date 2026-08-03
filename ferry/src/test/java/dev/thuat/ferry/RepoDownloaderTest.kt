@@ -121,6 +121,69 @@ class RepoDownloaderTest {
         assertEquals(6_000L, report.shortfallBytes)
     }
 
+    /**
+     * A device with room to finish must not be told it has no room to start. The more progress a
+     * resumable download has made, the more this matters — and the more likely a naive check is to
+     * refuse it.
+     */
+    @Test
+    fun `a mostly staged download only needs the remaining bytes`() {
+        val body = "0123456789"
+        File(temp.root, ".staging/a/b.d/model.bin.part").apply {
+            parentFile?.mkdirs()
+            writeText(body.take(8))
+        }
+        File(temp.root, ".staging/a/b.d/model.bin.validator").writeText("\"v1\"")
+        val files = listOf(remote("model.bin", body.length.toLong(), shaOf(body)))
+        server.enqueue(
+            MockResponse().setResponseCode(206).setBody(body.drop(8))
+                .addHeader("Content-Range", "bytes 8-9/10"),
+        )
+
+        // Room for the two remaining bytes, nowhere near room for all ten.
+        val downloader = RepoDownloader(
+            repo = fakeRepo(files),
+            downloader = ResumableDownloader(OkHttpClient()),
+            spaceCheck = SpaceCheck(probe = { 4 }, headroomBytes = 0L),
+        )
+
+        val result = runBlocking { downloader.download("a/b", temp.root) }
+
+        assertTrue("8 of 10 bytes are already on disk", result.isSuccess)
+    }
+
+    /**
+     * `ResumableDownloader` renames `.part` onto the final name as soon as the *server's* declared
+     * length is satisfied — before anything is compared to the manifest — so a complete-looking file
+     * can still be one the manifest rejects. Crediting it anyway would under-reserve for bytes that
+     * are about to be re-downloaded in full, which is the unsafe direction of error: over-reserving
+     * only refuses a download that would have fit, under-reserving starts one that fills the disk.
+     */
+    @Test
+    fun `a complete-looking staged file that fails the manifest's declared size is not credited`() {
+        val body = "0123456789"
+        File(temp.root, ".staging/a/b.d/model.bin").apply {
+            parentFile?.mkdirs()
+            // Complete by the server's own (stale) reckoning, but short of what this manifest declares.
+            writeText(body.take(6))
+        }
+        val files = listOf(remote("model.bin", body.length.toLong(), shaOf(body)))
+
+        // Room for the last four bytes only — sufficient if, and only if, the stale six are wrongly
+        // credited.
+        val downloader = RepoDownloader(
+            repo = fakeRepo(files),
+            downloader = ResumableDownloader(OkHttpClient()),
+            spaceCheck = SpaceCheck(probe = { 4 }, headroomBytes = 0L),
+        )
+
+        val result = runBlocking { downloader.download("a/b", temp.root) }
+
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull() is InsufficientSpaceException)
+        assertEquals("an uncredited refusal must still spend no network request", 0, server.requestCount)
+    }
+
     @Test
     fun `a file failing verification fails the whole repo`() {
         val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf("SOMETHING ELSE")))
@@ -875,5 +938,506 @@ class RepoDownloaderTest {
         server.enqueue(MockResponse().setResponseCode(500))
 
         assertTrue(runBlocking { downloaderFor(files).download("a/b", temp.root) }.isFailure)
+    }
+
+    /**
+     * The bytes already fetched are the whole point of resuming. Before this change the finally
+     * block deleted them, so a second attempt re-downloaded a multi-gigabyte model from zero.
+     */
+    @Test
+    fun `a failed download leaves its partial bytes in staging`() {
+        val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
+        // A body shorter than declared fails the size check after writing what it sent.
+        server.enqueue(MockResponse().setBody(weightsBody.take(5)))
+
+        val result = runBlocking { downloaderFor(files).download("a/b", temp.root) }
+
+        assertTrue(result.isFailure)
+        // Not "model.bin.part": ResumableDownloader compares what it wrote against this response's
+        // own Content-Length (5, matching what MockWebServer actually sent), agrees they match, and
+        // renames part onto the final in-staging name before returning success. It is the outer,
+        // stricter check against the manifest's declared size (13) that then fails.
+        val staged = File(temp.root, ".staging/a/b.d/model.bin")
+        assertTrue("the partial file is the resume point and must survive", staged.isFile)
+        assertEquals(5, staged.length())
+    }
+
+    /**
+     * Durable staging (Task 1) means a `.part` can outlive the manifest that produced it: the hub
+     * removed the file, or renamed it. Left alone it is never completed or committed, and a
+     * long-lived repo accretes it forever.
+     *
+     * Asserted at the *committed* path, not the staging one: on success `stagingDir` is renamed
+     * wholesale onto `target` (`RepoDownloader.download`'s own commit step), so checking the old
+     * `.staging/...` path proves nothing — it is always empty afterwards purely because the whole
+     * directory moved, whether or not the orphan was pruned. An unpruned orphan does not merely
+     * survive in staging forever; it rides that rename straight into the committed, "verified"
+     * repo, which is the failure this assertion actually has to catch.
+     */
+    @Test
+    fun `a staged file the manifest no longer lists is discarded`() {
+        File(temp.root, ".staging/a/b.d/gone.bin.part").apply {
+            parentFile?.mkdirs()
+            writeText("stale bytes from a manifest that no longer lists this file")
+        }
+        val files = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(configBody))
+
+        val dir = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+
+        assertFalse(
+            "an orphan must not accrete forever, and must never ride the commit rename into the repo",
+            File(dir, "gone.bin.part").exists(),
+        )
+    }
+
+    /**
+     * The counterpart to the orphan test above: pruning must not be so eager it deletes progress
+     * still worth keeping. A validator is staged alongside the `.part` — mirroring
+     * `ResumableDownloaderTest`'s own resume fixtures — because `ResumableDownloader` refuses to
+     * resume without one (see its own KDoc). Without the validator this attempt would restart from
+     * byte zero and could still land on the right final bytes, proving nothing about pruning at all;
+     * the Range header assertion below is what makes this a proof of resume rather than a coincidence
+     * of a passing restart.
+     *
+     * This may already pass before pruning is implemented — pruning only has to *not delete* this
+     * file, and resuming itself is `ResumableDownloader`'s pre-existing behaviour, exercised through
+     * `RepoDownloader` for the first time here. Kept as a regression pin either way: the thing worth
+     * protecting is pruning never becoming so aggressive it takes a live `.part` with it.
+     */
+    @Test
+    fun `a staged file the manifest still lists survives to be resumed`() {
+        val partial = File(temp.root, ".staging/a/b.d/config.json.part").apply {
+            parentFile?.mkdirs()
+            writeText(configBody.take(4))
+        }
+        File(temp.root, ".staging/a/b.d/config.json.validator").writeText("\"v1\"")
+        val files = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(
+            MockResponse().setResponseCode(206).setBody(configBody.drop(4))
+                .addHeader("Content-Range", "bytes 4-${configBody.length - 1}/${configBody.length}"),
+        )
+
+        val dir = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+
+        assertEquals(configBody, File(dir, "config.json").readText())
+        assertFalse(partial.exists())
+        val request = server.takeRequest()
+        assertEquals(
+            "must actually have asked for a range, not restarted from zero",
+            "bytes=4-",
+            request.getHeader("Range"),
+        )
+    }
+
+    /**
+     * The shape the plan's own correction names: `ResumableDownloader` renames `.part` onto the
+     * final name as soon as the *server's* declared length is satisfied, before `RepoDownloader`
+     * ever compares anything to the manifest — so an orphan can sit under its final name, not only
+     * as `.part`. A naive `endsWith(".part")` filter would miss exactly this file.
+     *
+     * Asserted at the committed path for the same reason as the `.part` orphan test above: the
+     * staging path is trivially empty after a successful commit regardless of pruning, because the
+     * whole directory is renamed away. An unpruned bare-name orphan would otherwise land inside the
+     * committed repo directory, indistinguishable from a real file to anything reading it back.
+     */
+    @Test
+    fun `a staged file under its final name that the manifest no longer lists is discarded too`() {
+        File(temp.root, ".staging/a/b.d/gone.bin").apply {
+            parentFile?.mkdirs()
+            writeText("a file the server considered complete, but the manifest no longer lists")
+        }
+        val files = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(configBody))
+
+        val dir = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+
+        assertFalse(
+            "a completed-looking orphan must not accrete forever, or end up inside the committed repo",
+            File(dir, "gone.bin").exists(),
+        )
+    }
+
+    /**
+     * Branch review: `pruneOrphans` deleted an orphan file but never the directory pruning it left
+     * empty, so an orphaned subdirectory survived the file pass and rode `stagingDir.renameTo(target)`
+     * straight into the committed repo — indistinguishable from real content once there. The orphan
+     * here sits inside its own subdirectory rather than directly in staging, so pruning its file
+     * empties "gone/" and this asserts that directory does not survive into the commit either.
+     */
+    @Test
+    fun `pruneOrphans removes a directory it empties, not only the files inside it`() {
+        File(temp.root, ".staging/a/b.d/gone/gone.bin.part").apply {
+            parentFile?.mkdirs()
+            writeText("stale bytes under a subdirectory the manifest no longer names")
+        }
+        val files = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(configBody))
+
+        val dir = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+
+        assertFalse(
+            "a directory emptied by pruning must not ride the commit rename into the repo",
+            File(dir, "gone").exists(),
+        )
+    }
+
+    /**
+     * Task 4b: the download loop called `download` for every file in the manifest unconditionally,
+     * even one already sitting in staging, correct, under its final name — the gap Task 4's own
+     * space credit exposed (crediting a staged file toward the space check while still re-fetching
+     * it is incoherent). Only model.bin's response is queued; config.json must be satisfied from
+     * staging alone. Asserted on server.requestCount, not only on success — the whole claim is that
+     * bytes did not move for the file already staged.
+     */
+    @Test
+    fun `a staged file that already satisfies the manifest is not re-fetched`() {
+        File(temp.root, ".staging/a/b.d/config.json").apply {
+            parentFile?.mkdirs()
+            writeText(configBody)
+        }
+        val files = listOf(
+            remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)),
+            remote("config.json", configBody.length.toLong(), shaOf(configBody)),
+        )
+        server.enqueue(MockResponse().setBody(weightsBody))
+
+        val result = runBlocking { downloaderFor(files).download("a/b", temp.root) }
+
+        assertTrue(result.isSuccess)
+        assertEquals("the staged file must not be re-fetched", 1, server.requestCount)
+    }
+
+    /**
+     * The shape RepoProgress.Skipped exists for: a caller watching fileIndex advance must see why
+     * config.json's index never appears in a Downloading event, rather than an unexplained gap.
+     */
+    @Test
+    fun `a skipped file reports Skipped instead of Downloading`() {
+        File(temp.root, ".staging/a/b.d/config.json").apply {
+            parentFile?.mkdirs()
+            writeText(configBody)
+        }
+        val files = listOf(
+            remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)),
+            remote("config.json", configBody.length.toLong(), shaOf(configBody)),
+        )
+        server.enqueue(MockResponse().setBody(weightsBody))
+
+        val seen = mutableListOf<RepoProgress>()
+        runBlocking { downloaderFor(files).download("a/b", temp.root) { seen += it } }
+
+        val skipped = seen.filterIsInstance<RepoProgress.Skipped>().single()
+        assertEquals("config.json", skipped.path)
+        assertEquals(2, skipped.fileCount)
+        assertTrue(
+            "a skipped file must never also report Downloading — no bytes moved for it",
+            seen.none { it is RepoProgress.Downloading && it.path == "config.json" },
+        )
+    }
+
+    /**
+     * Task 4b's own load-bearing guard: skipping must key off correctness, not mere presence. A
+     * staged file whose bytes are wrong must still be fetched — skipping on existence alone would
+     * commit a corrupt file, which is guarantee 2 (README's guarantee table: "never a corrupt
+     * model"). Revert-checked: with the predicate weakened to a bare `destination.exists()`, this
+     * test fails (0 requests, and the corrupt bytes ride straight into the committed repo) — see
+     * task-4b-report.md for the observed failure.
+     */
+    @Test
+    fun `a staged file whose bytes do not match the manifest is still fetched`() {
+        File(temp.root, ".staging/a/b.d/model.bin").apply {
+            parentFile?.mkdirs()
+            writeText("wrong bytes, wrong length, staged under the right name")
+        }
+        val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
+        server.enqueue(MockResponse().setBody(weightsBody))
+
+        val dir = runBlocking { downloaderFor(files).download("a/b", temp.root) }.getOrThrow()
+
+        assertEquals("a corrupt staged file must be fetched, not skipped", 1, server.requestCount)
+        assertEquals(weightsBody, File(dir, "model.bin").readText())
+    }
+
+    @Test
+    fun `abandon removes only this repo's staging`() {
+        val mine = File(temp.root, ".staging/a/b.d/model.bin.part").apply {
+            parentFile?.mkdirs()
+            writeText("mine")
+        }
+        val other = File(temp.root, ".staging/c/d.d/model.bin.part").apply {
+            parentFile?.mkdirs()
+            writeText("other")
+        }
+
+        val result = runBlocking { downloaderFor(emptyList()).abandon("a/b", temp.root) }
+
+        assertTrue(result.isSuccess)
+        assertFalse(mine.exists())
+        assertTrue("another repo's staging is not this call's business", other.exists())
+    }
+
+    /**
+     * The property the KDoc calls out by name: abandoning an in-progress download says nothing
+     * about a previously committed copy of the same repo id, which may be complete, verified, and in
+     * use by the host right now. `abandon` must never resolve against `into` itself, only against
+     * `into/.staging`.
+     *
+     * Branch review: with only a committed copy and no staging, this used to pass for the wrong
+     * reason — `abandon` found `stagingDir.exists()` false and returned early having done nothing at
+     * all, which would pass identically for a completely broken `abandon` that never deletes
+     * anything. Now stages this same id too, so the assertion on `staged` only passes if `abandon`
+     * actually deletes staging, and the assertion on `committed` only means something once it does.
+     */
+    @Test
+    fun `abandon does not touch an already committed repo`() {
+        val committed = File(temp.root, "a/b/model.bin").apply {
+            parentFile?.mkdirs()
+            writeText("committed bytes")
+        }
+        File(temp.root, "a/b/.ferry").writeText("a/b")
+        val staged = File(temp.root, ".staging/a/b.d/model.bin.part").apply {
+            parentFile?.mkdirs()
+            writeText("in-flight bytes, unrelated to the committed copy above")
+        }
+
+        val result = runBlocking { downloaderFor(emptyList()).abandon("a/b", temp.root) }
+
+        assertTrue(result.isSuccess)
+        assertFalse("abandon must actually delete this repo id's own staging", staged.exists())
+        assertTrue("abandoning a download says nothing about a completed one", committed.exists())
+        assertEquals("committed bytes", committed.readText())
+    }
+
+    /**
+     * repoId is caller-supplied, same as in [download]; `abandon` must refuse the same escapes
+     * rather than trust its own, separate reasoning about what's safe.
+     */
+    @Test
+    fun `abandon cannot escape into`() {
+        val outside = File(temp.root, "outside.txt").apply { writeText("not yours") }
+
+        val result = runBlocking { downloaderFor(emptyList()).abandon("../..", temp.root) }
+
+        assertTrue(result.isFailure)
+        assertTrue(outside.exists())
+    }
+
+    /** The caller asked for a state — no staging for this repo id — that already holds. */
+    @Test
+    fun `abandoning a repo with no staging succeeds`() {
+        assertTrue(runBlocking { downloaderFor(emptyList()).abandon("never/started", temp.root) }.isSuccess)
+    }
+
+    @Test
+    fun `stagedBytes is zero when nothing has ever been staged`() {
+        assertEquals(0L, runBlocking { downloaderFor(emptyList()).stagedBytes("a/b", temp.root) })
+    }
+
+    /** A `.part` with a validator is exactly what `ResumableDownloader` resumes from — see its own KDoc. */
+    @Test
+    fun `stagedBytes credits a part file that has a validator`() {
+        File(temp.root, ".staging/a/b.d/model.bin.part").apply {
+            parentFile?.mkdirs()
+            writeText("12345678") // 8 bytes
+        }
+        File(temp.root, ".staging/a/b.d/model.bin.validator").writeText("\"v1\"")
+
+        assertEquals(8L, runBlocking { downloaderFor(emptyList()).stagedBytes("a/b", temp.root) })
+    }
+
+    /**
+     * No validator, no resume: `ResumableDownloader` refuses to resume blind and restarts this file
+     * from byte zero (its own KDoc). Counting these bytes would overstate what the next attempt
+     * actually reuses — exactly the dishonesty `stagedBytes`' own KDoc says it must not commit.
+     */
+    @Test
+    fun `stagedBytes does not credit a part file with no validator`() {
+        File(temp.root, ".staging/a/b.d/model.bin.part").apply {
+            parentFile?.mkdirs()
+            writeText("12345678")
+        }
+
+        assertEquals(0L, runBlocking { downloaderFor(emptyList()).stagedBytes("a/b", temp.root) })
+    }
+
+    /**
+     * The shape `ResumableDownloader` leaves once the *server's* declared length is satisfied, before
+     * anything is compared to the manifest — the strongest kind of progress, but not re-verified here
+     * (see `stagedBytes`' own doc on why it disagrees with `RepoDownloader`'s own credit check).
+     */
+    @Test
+    fun `stagedBytes counts a bare staged file under its final name`() {
+        File(temp.root, ".staging/a/b.d/config.json").apply {
+            parentFile?.mkdirs()
+            writeText(configBody)
+        }
+
+        assertEquals(
+            configBody.length.toLong(),
+            runBlocking { downloaderFor(emptyList()).stagedBytes("a/b", temp.root) },
+        )
+    }
+
+    @Test
+    fun `stagedBytes sums every staged file's reusable bytes together, touching no network`() {
+        File(temp.root, ".staging/a/b.d/config.json").apply {
+            parentFile?.mkdirs()
+            writeText(configBody) // bare, complete-looking: counted in full
+        }
+        File(temp.root, ".staging/a/b.d/model.bin.part").apply {
+            writeText("12345678") // 8 resumable bytes, credited
+        }
+        File(temp.root, ".staging/a/b.d/model.bin.validator").writeText("\"v1\"")
+        File(temp.root, ".staging/a/b.d/other.bin.part").writeText("not credited, no validator")
+
+        val expected = configBody.length.toLong() + 8L
+        assertEquals(expected, runBlocking { downloaderFor(emptyList()).stagedBytes("a/b", temp.root) })
+        assertEquals("must not touch the network", 0, server.requestCount)
+    }
+
+    /**
+     * The marker `download()` writes into staging just before the commit rename (`MARKER_FILE`) is
+     * Ferry's own bookkeeping, not a manifest file's bytes, and must not inflate the count.
+     */
+    @Test
+    fun `stagedBytes ignores the ownership marker written just before commit`() {
+        File(temp.root, ".staging/a/b.d/config.json").apply {
+            parentFile?.mkdirs()
+            writeText(configBody)
+        }
+        File(temp.root, ".staging/a/b.d/.ferry").writeText("a/b")
+
+        assertEquals(
+            configBody.length.toLong(),
+            runBlocking { downloaderFor(emptyList()).stagedBytes("a/b", temp.root) },
+        )
+    }
+
+    /** Total, not `Result`-returning: an escaping repo id is zero bytes of progress, not a thrown exception. */
+    @Test
+    fun `stagedBytes is zero rather than throwing for an escaping repo id`() {
+        assertEquals(0L, runBlocking { downloaderFor(emptyList()).stagedBytes("../..", temp.root) })
+    }
+
+    /**
+     * Ties `stagedBytes` back to the scenario that opened this whole plan: the bytes a failed
+     * download leaves behind (Task 1's own test) are exactly what this method exists to surface.
+     */
+    @Test
+    fun `stagedBytes reflects the bytes a failed download actually left behind`() {
+        val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
+        // A body shorter than declared fails the size check after writing what it sent.
+        server.enqueue(MockResponse().setBody(weightsBody.take(5)))
+        val downloader = downloaderFor(files)
+
+        val result = runBlocking { downloader.download("a/b", temp.root) }
+
+        assertTrue(result.isFailure)
+        assertEquals(5L, runBlocking { downloader.stagedBytes("a/b", temp.root) })
+    }
+
+    /**
+     * CRITICAL, whole-branch review — the design argument that staging sits outside the target
+     * directory ("target vs staging" — deleting staging cannot corrupt a committed repo) is true but
+     * too narrow: "owner" and "owner/model" are both ordinary repo ids (`MARKER_FILE`'s own doc), and
+     * staging mirrored that nesting with no shadow tree to guard it the way target has (`MARKER_ROOT`)
+     * — `into/.staging/owner` was a literal ancestor directory of `into/.staging/owner/model`. This is
+     * "staging vs staging", not "target vs staging", and the old argument says nothing about it.
+     *
+     * A failed `download("owner/model")` left its resumable bytes sitting inside "owner"'s own
+     * staging subtree. Downloading "owner" next walked straight into them via `pruneOrphans`, which
+     * has no way to know "owner/model" is a different repo's live scratch: it deleted the file as an
+     * orphan of a manifest that was never its, and the emptied `model/` directory rode
+     * `stagingDir.renameTo(target)` into the committed `into/owner` on the very same rename — foreign
+     * content inside a repo that then reports a cache hit forever, and "owner/model" permanently
+     * refused afterwards (`into/owner/model` now exists with no marker of its own).
+     *
+     * Every assertion below is against public API only (`stagedBytes`, the committed directory
+     * `download` itself returns, `Result.isSuccess`) rather than an internal staging path, so this
+     * proves the actual observable bug, not merely a hardcoded path shape.
+     *
+     * Revert-check: with `stagingDirFor` reverted to a bare `resolveInside(stagingRoot, repoId)`
+     * (staging/RepoDownloader.kt's pre-fix shape), this fails on all three post-owner-download
+     * assertions — see review-fix-report.md for the observed output.
+     */
+    @Test
+    fun `a prefix repo's own download does not reach into a nested repo's staging`() {
+        val modelDownloader = downloaderFor(
+            listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody))),
+        )
+        // A body shorter than declared fails the size check after writing what it sent — same shape
+        // as "a failed download leaves its partial bytes in staging" above.
+        server.enqueue(MockResponse().setBody(weightsBody.take(5)))
+        val modelResult = runBlocking { modelDownloader.download("owner/model", temp.root) }
+        assertTrue(modelResult.isFailure)
+        assertEquals(5L, runBlocking { modelDownloader.stagedBytes("owner/model", temp.root) })
+
+        val ownerFiles = listOf(remote("config.json", configBody.length.toLong()))
+        server.enqueue(MockResponse().setBody(configBody))
+        val ownerDir = runBlocking { downloaderFor(ownerFiles).download("owner", temp.root) }.getOrThrow()
+
+        assertEquals(
+            "an unrelated prefix repo's own download must not prune owner/model's progress",
+            5L,
+            runBlocking { modelDownloader.stagedBytes("owner/model", temp.root) },
+        )
+        assertFalse(
+            "owner/model must never appear inside the committed owner directory",
+            File(ownerDir, "model").exists(),
+        )
+
+        server.enqueue(MockResponse().setBody(weightsBody))
+        val retryResult = runBlocking { modelDownloader.download("owner/model", temp.root) }
+        assertTrue(
+            "owner/model must still be downloadable, not permanently refused by a leftover directory",
+            retryResult.isSuccess,
+        )
+    }
+
+    /**
+     * `abandon` reached a nested id's staging the same way `pruneOrphans` did — via
+     * `deleteRecursively()` on a `stagingDir` that used to be a literal ancestor directory of a
+     * nested id's own. See `stagingDirFor`'s own doc.
+     */
+    @Test
+    fun `abandoning a prefix repo does not touch a nested repo's own staging`() {
+        val modelDownloader = downloaderFor(
+            listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody))),
+        )
+        server.enqueue(MockResponse().setBody(weightsBody.take(5)))
+        runBlocking { modelDownloader.download("owner/model", temp.root) }
+
+        val result = runBlocking { downloaderFor(emptyList()).abandon("owner", temp.root) }
+
+        assertTrue(result.isSuccess)
+        assertEquals(
+            "abandoning a prefix repo id must not delete a nested repo's own staging",
+            5L,
+            runBlocking { modelDownloader.stagedBytes("owner/model", temp.root) },
+        )
+    }
+
+    /**
+     * `stagedBytes` summed a nested id's staging into the prefix id's own count the same way —
+     * `stagingDir.walkTopDown()` walked straight into it. See `stagingDirFor`'s own doc.
+     */
+    @Test
+    fun `stagedBytes for a prefix repo does not count a nested repo's own staging`() {
+        val ownerDownloader = downloaderFor(listOf(remote("config.json", configBody.length.toLong())))
+        server.enqueue(MockResponse().setBody(configBody.take(3)))
+        runBlocking { ownerDownloader.download("owner", temp.root) }
+
+        val modelDownloader = downloaderFor(
+            listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody))),
+        )
+        server.enqueue(MockResponse().setBody(weightsBody.take(5)))
+        runBlocking { modelDownloader.download("owner/model", temp.root) }
+
+        assertEquals(
+            "must not sum a nested id's own staged bytes into the prefix id's count",
+            3L,
+            runBlocking { ownerDownloader.stagedBytes("owner", temp.root) },
+        )
     }
 }

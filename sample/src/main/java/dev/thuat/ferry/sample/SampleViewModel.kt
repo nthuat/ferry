@@ -66,7 +66,39 @@ class SampleViewModel(application: Application) : AndroidViewModel(application) 
      */
     private val inFlightRepoIds = mutableSetOf<String>()
 
-    /** The Download action. Routed through whichever downloader the sabotage toggle selects. */
+    /**
+     * Surfaces staging a process death (or any attempt this app never got to retry) left behind:
+     * every catalog entry with [RepoDownloader.stagedBytes] above zero starts life as
+     * [DownloadState.Interrupted] instead of [DownloadState.Available], offering Resume/Discard
+     * rather than silently sitting on bytes a resumed [download] could reuse.
+     *
+     * [DownloadState.withStagedBytes] — not this block itself — is what makes this safe against the
+     * one real race: a user tapping Download on a row before this file-system walk resolves. That
+     * function only ever overrides a row still [DownloadState.Available] by the time it runs, so a
+     * row `runDownload` has already moved on from `Available` wins over a stale "interrupted" verdict
+     * arriving late, rather than being clobbered by it.
+     *
+     * Runs once, here, rather than on some recurring timer: nothing other than this app's own
+     * [download] and [discard] touch its staging, so nothing can go stale after the first read.
+     */
+    init {
+        viewModelScope.launch {
+            // No withContext(Dispatchers.IO) here: RepoDownloader.stagedBytes suspends and runs on
+            // its own dispatcher now, the same way download and abandon already did — see its own
+            // KDoc. Wrapping it again here would only be redundant, not wrong.
+            val stagedByRepoId =
+                SAMPLE_CATALOG.associate { it.repoId to realDownloader.stagedBytes(it.repoId, downloadRoot) }
+            _uiState.update { state ->
+                state.copy(
+                    rows = state.rows.map { row ->
+                        row.copy(state = row.state.withStagedBytes(stagedByRepoId[row.catalog.repoId] ?: 0L))
+                    },
+                )
+            }
+        }
+    }
+
+    /** The Download action — also what an `Interrupted` row's Resume button calls; see that state's own doc. */
     fun download(repoId: String) {
         val downloader = if (_uiState.value.sabotage.lowDiskSimulationEnabled) sabotageDownloader else realDownloader
         viewModelScope.launch { runDownload(repoId, downloader) }
@@ -82,6 +114,35 @@ class SampleViewModel(application: Application) : AndroidViewModel(application) 
      */
     fun recheck(repoId: String) {
         viewModelScope.launch { runDownload(repoId, realDownloader) }
+    }
+
+    /**
+     * The Discard action on an `Interrupted` row. Reclaims the staging that row's caption described,
+     * via [RepoDownloader.abandon] — which, per its own doc, never touches a previously committed
+     * copy of the same repo id, only this attempt's staging.
+     *
+     * Guarded by [inFlightRepoIds] the same way [runDownload] is: `abandon` and `download` touch the
+     * same staging directory, so a Discard tap racing a Resume tap for the same row is exactly the
+     * concurrent-access case that field already exists to rule out.
+     */
+    fun discard(repoId: String) {
+        if (!inFlightRepoIds.add(repoId)) return // already busy for this repo id — see the field's doc
+        viewModelScope.launch {
+            try {
+                realDownloader.abandon(repoId, downloadRoot).fold(
+                    onSuccess = { setRowState(repoId, DownloadState.Available) },
+                    onFailure = { error -> setRowState(repoId, error.toDownloadState()) },
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // abandon() converts every failure it anticipates into Result.failure; this is the
+                // sample's own safety net against whatever it does not — see runDownload's own catch.
+                setRowState(repoId, DownloadState.Failed(e.message ?: e::class.java.simpleName))
+            } finally {
+                inFlightRepoIds.remove(repoId)
+            }
+        }
     }
 
     /**
@@ -165,10 +226,17 @@ class SampleViewModel(application: Application) : AndroidViewModel(application) 
         var lastFileCount: Int? = null
         try {
             val result = downloader.download(repoId, downloadRoot) { progress ->
-                if (progress is RepoProgress.Downloading) {
-                    sawTransfer = true
-                    lastFileCount = progress.fileCount
+                // marksRealAttempt: Skipped counts the same as Downloading here. An all-staged
+                // resume fires only Skipped, one per file, yet still commits staging into the
+                // target directory via the same rename a real transfer ends with — reporting that
+                // as a cache hit would claim the free whole-repo shortcut ran when it did not. See
+                // ProgressMapping.kt's own doc on marksRealAttempt.
+                when (progress) {
+                    is RepoProgress.Downloading -> lastFileCount = progress.fileCount
+                    is RepoProgress.Skipped -> lastFileCount = progress.fileCount
+                    else -> Unit
                 }
+                if (progress.marksRealAttempt) sawTransfer = true
                 if (throttle.shouldEmit(progress)) {
                     setRowState(repoId, progress.toDownloadState(sawTransfer, lastFileCount))
                 }
