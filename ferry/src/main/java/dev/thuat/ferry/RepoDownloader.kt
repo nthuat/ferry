@@ -524,6 +524,16 @@ class RepoDownloader(
      *   payload, and the marker [download] writes into staging just before committing
      *   (`target/[MARKER_FILE]`, still sitting in staging in the narrow window before the rename)
      *   contributes nothing either, for the same reason.
+     *
+     * **The enumeration above answers "is this shape reusable", never "does a current manifest still
+     * name this path at all" — that is not completeness, and is not claimed as any.** The second
+     * question needs a manifest, and fetching one is the network call this method exists to avoid.
+     * A path the hub has since renamed or removed is exactly what [pruneOrphans] discards,
+     * unconditionally, the moment a real [download] call actually runs — so a `.part` with a
+     * validator, or a bare file, staged under a path no manifest names any more is still counted
+     * here and then discarded there, without ever being resumed. Not a gap this method could close
+     * without a manifest to check against; stated here rather than left for the list above to imply
+     * a completeness it cannot have.
      */
     suspend fun stagedBytes(repoId: String, into: File): Long = withContext(dispatcher) {
         try {
