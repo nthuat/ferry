@@ -46,10 +46,23 @@ client it built behind your back.
 
 ## Getting it
 
-Not on Maven Central. `dev.thuat` would need `thuat.dev` to be a domain this project owns, and it
-is not one, so publishing is a decision rather than a formality.
+Not on Maven Central yet. The coordinates are settled — `dev.thuat:ferry` and `dev.thuat:ferry-work`,
+currently `0.1.0` — and `dev.thuat` is reserved: this project's owner owns `thuat.dev`. Both modules'
+`build.gradle.kts` already carry the full publishing setup (`maven-publish`, `signing`, sources and
+javadoc jars, a POM with name/description/url/licenses/developers/scm — see
+`gradle/publishing.gradle.kts` for the parts shared between them). What is still missing is entirely
+account and credential setup, not code:
 
-Until then, a composite build is the way to depend on it without vendoring a copy:
+- A Sonatype Central Portal account, with the `dev.thuat` namespace claimed on it.
+- A DNS TXT record on `thuat.dev` proving ownership of that namespace to Central Portal.
+- A GPG key pair, published to a public keyserver. Its ASCII-armored private key and passphrase go in
+  `signingInMemoryKey` / `signingInMemoryKeyPassword`; a Central Portal user token goes in
+  `mavenCentralUsername` / `mavenCentralPassword`. All four are read from a Gradle property or an
+  environment variable of the same name (`gradle/publishing.gradle.kts`), with no default — so
+  building or testing this repository, including `./gradlew :ferry:publishToMavenLocal`, needs none of
+  them. A contributor cloning this never needs a signing key.
+
+Until it's actually published, a composite build is the way to depend on it without vendoring a copy:
 
 ```kotlin
 // settings.gradle.kts
