@@ -13,6 +13,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.io.IOException
 
 class RepoDownloaderTest {
 
@@ -255,6 +256,41 @@ class RepoDownloaderTest {
             "the user's own file",
             theirs.readText(),
         )
+    }
+
+    /**
+     * `repo.manifest()` moved inside `download`'s own try specifically so this cannot happen: a
+     * third-party ModelHub is free to throw instead of returning Result.failure, and before that move
+     * the throw would have escaped this method's own Result<File> contract entirely.
+     */
+    @Test
+    fun `a hub whose manifest throws fails cleanly instead of escaping as an exception`() {
+        val throwingHub = object : ModelHub {
+            override suspend fun manifest(repoId: String): Result<RepoManifest> =
+                throw IllegalStateException("hub blew up")
+        }
+        val downloader = RepoDownloader(repo = throwingHub, downloader = ResumableDownloader(OkHttpClient()))
+
+        val result = runBlocking { downloader.download("a/b", temp.root) }
+
+        assertTrue("a throw from a third-party hub must become Result.failure, not escape", result.isFailure)
+        assertTrue(result.exceptionOrNull() is IOException)
+    }
+
+    /** A hub is free to fail with any Throwable; download() must still only ever hand back an IOException. */
+    @Test
+    fun `a hub's non-IOException Result failure is wrapped rather than passed through`() {
+        val boom = IllegalStateException("hub said no")
+        val failingHub = object : ModelHub {
+            override suspend fun manifest(repoId: String): Result<RepoManifest> = Result.failure(boom)
+        }
+        val downloader = RepoDownloader(repo = failingHub, downloader = ResumableDownloader(OkHttpClient()))
+
+        val result = runBlocking { downloader.download("a/b", temp.root) }
+
+        val failure = result.exceptionOrNull()
+        assertTrue("a non-IOException failure must be wrapped, not passed through as-is", failure is IOException)
+        assertEquals("the original cause must still be reachable", boom, failure?.cause)
     }
 
     /**

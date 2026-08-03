@@ -1,5 +1,6 @@
 package dev.thuat.ferry
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -156,19 +157,28 @@ class RepoDownloader(
         into: File,
         onProgress: (RepoProgress) -> Unit = {},
     ): Result<File> = withContext(dispatcher) {
-        val manifest = repo.manifest(repoId).getOrElse { return@withContext Result.failure(it) }
-
-        // An empty manifest is a listing that failed without saying so — a hub answering 200 with
-        // [], a revision that does not exist, a filter that matched nothing. Refused here because
-        // every downstream check is written as "every file is correct", and every file of no files
-        // is trivially correct: the cache check would call any directory that happened to exist a
-        // hit and return it, and with nothing there the commit step would publish a repo containing
-        // only its own marker. Both are permanent cache hits that no later call can repair.
-        if (manifest.files.isEmpty()) {
-            return@withContext Result.failure(IOException("no files listed for $repoId"))
-        }
-
         try {
+            // Inside the try, not before it: `repo` is a third-party ModelHub (its own KDoc), and
+            // nothing stops an implementation from throwing instead of returning Result.failure — a
+            // call site before this try let that throw escape download()'s own Result<File> contract
+            // entirely. A throw here is now caught below like any other failure in this method.
+            // asDownloadFailure also normalises the well-behaved-looking case: a hub can return
+            // Result.failure(anything), an untyped Throwable that need not be an IOException, and
+            // every other failure this method hands back already is one.
+            val manifest = repo.manifest(repoId).getOrElse { failure ->
+                return@withContext Result.failure(failure.asDownloadFailure())
+            }
+
+            // An empty manifest is a listing that failed without saying so — a hub answering 200 with
+            // [], a revision that does not exist, a filter that matched nothing. Refused here because
+            // every downstream check is written as "every file is correct", and every file of no files
+            // is trivially correct: the cache check would call any directory that happened to exist a
+            // hit and return it, and with nothing there the commit step would publish a repo containing
+            // only its own marker. Both are permanent cache hits that no later call can repair.
+            if (manifest.files.isEmpty()) {
+                return@withContext Result.failure(IOException("no files listed for $repoId"))
+            }
+
             // repoId is used as a relative path rather than flattened into one directory name, so
             // two distinct ids (e.g. "a/b" and "a--b") can never collide onto the same directory.
             //
@@ -426,10 +436,35 @@ class RepoDownloader(
 
             onProgress(RepoProgress.Complete(repoId, target))
             Result.success(target)
-        } catch (e: IOException) {
-            Result.failure(e)
+        } catch (e: CancellationException) {
+            // Structured concurrency depends on cancellation propagating; swallowing it here would
+            // make this the one place in the library that breaks that.
+            throw e
+        } catch (e: Exception) {
+            // Widened from IOException so a throw out of repo.manifest() (moved inside this try
+            // above) is caught here instead of escaping this method's own Result<File> contract.
+            // Strictly wider than before, not a behaviour change for the rest of this try: every other
+            // line above this catch already only ever throws IOException in practice, so this only
+            // changes what happens for a throw that was never anticipated in the first place —
+            // asDownloadFailure keeps the result the IOException-only type every other failure in this
+            // method already is.
+            Result.failure(e.asDownloadFailure())
         }
     }
+
+    /**
+     * [this] unchanged if it is already an [IOException] — or a subtype, like
+     * [InsufficientSpaceException] or [VerificationException] — otherwise wrapped in one.
+     *
+     * `repo` is a third-party [ModelHub] (see its own KDoc on [ModelHub.manifest]), so its failure can
+     * arrive as literally anything: a `Result.failure` carrying an unrelated `Throwable`, or, now that
+     * the call is inside [download]'s own try, whatever type an uncaught throw happens to be. Every
+     * other failure [download] produces or passes through is already an [IOException], so normalising
+     * here — rather than handing back whatever the hub gave — is what keeps that true regardless of
+     * how a hub misbehaves.
+     */
+    private fun Throwable.asDownloadFailure(): IOException =
+        this as? IOException ?: IOException(message ?: toString(), this)
 
     /**
      * Reclaims the staging bytes of a [download] for [repoId] under [into] that the caller has given

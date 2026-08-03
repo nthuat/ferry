@@ -42,5 +42,13 @@ data class RepoManifest(
  */
 interface ModelHub {
 
+    /**
+     * Implementations should report failure as `Result.failure(IOException)` — an `IOException` or one
+     * of its subtypes — not an arbitrary `Throwable`, and should not throw out of this function at all.
+     * `RepoDownloader.download()` normalises either violation rather than trusting it (wrapping a
+     * non-`IOException` failure, and catching a throw), so a misbehaving implementation cannot crash a
+     * caller — but the normalised result carries less information than reporting it correctly in the
+     * first place would have.
+     */
     suspend fun manifest(repoId: String): Result<RepoManifest>
 }
