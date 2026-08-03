@@ -236,13 +236,24 @@ class RepoDownloader(
             // here would only protect callers who go through RepoDownloader, and SpaceCheck is public,
             // usable directly for a preflight check without ever calling download() at all.
             //
-            // manifest.creditingStaged(stagingDir), not manifest itself: a download staged 90%
-            // already needs only the remaining 10%, and reserving the full total tells a device with
-            // room to finish it has no room to start — worse the more progress a resume has made,
-            // which is exactly backwards. See creditingStaged's own doc for what is and is not
-            // credited. SpaceCheck itself is unchanged; only the manifest it is asked about differs.
+            // manifest.creditingStaged(stagingDir, satisfiedPaths), not manifest itself: a download
+            // staged 90% already needs only the remaining 10%, and reserving the full total tells a
+            // device with room to finish it has no room to start — worse the more progress a resume
+            // has made, which is exactly backwards. See creditingStaged's own doc for what is and is
+            // not credited. SpaceCheck itself is unchanged; only the manifest it is asked about
+            // differs.
+            //
+            // satisfiedPaths is computed once, here, rather than left for isSatisfiedIn to answer
+            // twice: a bare staged file's hash is the expensive half of that check, and the loop
+            // below used to ask the identical question again per file to decide whether to skip it
+            // — doubling every staged byte's SHA-256 for no new information, all of it before a
+            // single network request. Computed against the manifest as given, not the space-credited
+            // copy below, since sizeBytes is exactly what changes between the two.
             onProgress(RepoProgress.CheckingSpace(repoId))
-            val report = spaceCheck.check(manifest.creditingStaged(stagingDir), into)
+            val satisfiedPaths = manifest.files
+                .filter { it.isSatisfiedIn(stagingDir) }
+                .mapTo(HashSet()) { it.path }
+            val report = spaceCheck.check(manifest.creditingStaged(stagingDir, satisfiedPaths), into)
             if (!report.sufficient) {
                 return@withContext Result.failure(InsufficientSpaceException(report))
             }
@@ -259,16 +270,20 @@ class RepoDownloader(
                 // way repoId is. Without this, a hostile listing could write anywhere on disk.
                 val destination = resolveInside(stagingDir, remote.path)
 
-                // Reuses isSatisfiedIn — the same per-file predicate isSatisfiedBy (whole-repo
-                // cache hit) and remainingBytes (space credit) already apply, not a fresh "looks
-                // done" check of its own. A bare destination.exists() would count a staged file as
-                // done because a file happens to sit at that path, committing whatever bytes are
-                // actually there unread — the drift between "counted as progress" and "skipped"
-                // that this file's own history (docs/known-limitations.md) warns is how a repo
-                // ends up committed and then failing its own cache check forever. isSatisfiedIn
-                // re-hashes, so a staged file that merely exists but does not match still falls
-                // through to an ordinary fetch below.
-                if (remote.isSatisfiedIn(stagingDir)) {
+                // satisfiedPaths, computed once above — not a fresh remote.isSatisfiedIn(stagingDir)
+                // call here. The verdict is the same per-file predicate isSatisfiedBy (whole-repo
+                // cache hit) and remainingBytes (space credit) already apply, reused rather than
+                // asked a second time: isSatisfiedIn re-hashes a bare staged file to reach this
+                // answer, and asking it again per file here — after the space check had already
+                // asked it for every file — hashed every staged byte twice for no new information.
+                // A bare destination.exists() would count a staged file as done because a file
+                // happens to sit at that path, committing whatever bytes are actually there unread —
+                // the drift between "counted as progress" and "skipped" that this file's own history
+                // (docs/known-limitations.md) warns is how a repo ends up committed and then failing
+                // its own cache check forever; satisfiedPaths only ever contains a path isSatisfiedIn
+                // actually verified, so a staged file that merely exists but does not match still
+                // falls through to an ordinary fetch below.
+                if (remote.path in satisfiedPaths) {
                     onProgress(RepoProgress.Skipped(repoId, remote.path, index, manifest.files.size))
                     return@forEachIndexed
                 }
@@ -540,13 +555,15 @@ class RepoDownloader(
      * later call forever. A declared 0 is treated as a real, checked assertion that the file is empty
      * in both places now, not "unknown, don't check" in one and enforced in the other.
      *
-     * One predicate behind three questions now: [isSatisfiedBy] applies it to every file to decide a
-     * whole-repo cache hit against the *committed* directory; [remainingBytes] below applies it to one
-     * file to decide whether a *staged* copy — sitting under its final name in `.staging`, not yet
-     * committed — is safe to credit in the space check; and [download]'s own loop applies it to that
-     * same staged copy to decide whether the file needs a request at all. All three need the same
-     * answer to "is this file actually done", so it exists once rather than as multiple versions that
-     * could quietly drift apart.
+     * One predicate behind two questions now — down from three: [isSatisfiedBy] applies it to every
+     * file to decide a whole-repo cache hit against the *committed* directory, and [download] itself
+     * applies it once per staged file, before the transfer loop, to build `satisfiedPaths` — the set
+     * both [remainingBytes] (space credit) and the loop's own skip check consult afterward, rather
+     * than each calling this a second time. It used to be three call sites invoking this directly:
+     * the loop asked the identical question again per file, after the space check had already asked
+     * it for every file, hashing every staged byte twice for no new information. All call sites still
+     * need the same answer to "is this file actually done", so the predicate stays one function —
+     * only the number of times it actually runs against a given file changed.
      */
     private fun RemoteFile.isSatisfiedIn(dir: File): Boolean {
         val onDisk = resolveInside(dir, path)
@@ -560,12 +577,17 @@ class RepoDownloader(
      * already staged and safe to reuse, so a mostly-resumed download does not reserve bytes that are
      * already on disk.
      *
+     * [satisfiedPaths] is [download]'s own precomputed verdict — every path in [manifest] for which
+     * [isSatisfiedIn] answered true against [stagingDir] — passed in rather than recomputed here, so
+     * crediting a bare, correct staged file does not hash it a second time (the loop's own skip check
+     * is the first).
+     *
      * Scoped to this one call site — [SpaceCheck.check] is the only consumer. Everywhere else in
      * [download] (the transfer loop, per-file verification, [pruneOrphans]) uses the real [manifest],
      * because those need the actual declared size, not this reduced stand-in.
      */
-    private fun RepoManifest.creditingStaged(stagingDir: File): RepoManifest =
-        copy(files = files.map { it.copy(sizeBytes = it.remainingBytes(stagingDir)) })
+    private fun RepoManifest.creditingStaged(stagingDir: File, satisfiedPaths: Set<String>): RepoManifest =
+        copy(files = files.map { it.copy(sizeBytes = it.remainingBytes(stagingDir, satisfiedPaths)) })
 
     /**
      * Bytes of this file still needed from the network, after crediting whatever [stagingDir] already
@@ -574,13 +596,13 @@ class RepoDownloader(
      * Staging can hold this file in three shapes (see the plan's "What staging actually contains").
      * Only two are credited:
      *
-     * - **A bare file under its final name** is credited in full, but only when [isSatisfiedIn]
-     *   agrees — reused rather than trusting presence alone. `ResumableDownloader` renames `.part`
-     *   onto the final name as soon as the *server's* declared length is met, before anything is
-     *   compared to the manifest, so a complete-looking file can still be one the manifest rejects.
-     *   Crediting it anyway would under-reserve for bytes about to be re-downloaded in full — the
-     *   unsafe direction of error — so an unsatisfied bare file counts as no progress, not partial
-     *   progress.
+     * - **A bare file under its final name** is credited in full, but only when [satisfiedPaths]
+     *   (this [path] having already answered true to [isSatisfiedIn]) agrees — reused rather than
+     *   trusting presence alone. `ResumableDownloader` renames `.part` onto the final name as soon as
+     *   the *server's* declared length is met, before anything is compared to the manifest, so a
+     *   complete-looking file can still be one the manifest rejects. Crediting it anyway would
+     *   under-reserve for bytes about to be re-downloaded in full — the unsafe direction of error —
+     *   so an unsatisfied bare file counts as no progress, not partial progress.
      * - **A `.part` with a `.validator`** is credited for the bytes already on disk:
      *   `ResumableDownloader` resumes from exactly `haveBytes` when a validator is present, so that
      *   many bytes are genuinely not fetched again.
@@ -593,8 +615,8 @@ class RepoDownloader(
      * declaration changed — must not manufacture a negative requirement that silently subsidises some
      * other file's.
      */
-    private fun RemoteFile.remainingBytes(stagingDir: File): Long {
-        if (isSatisfiedIn(stagingDir)) return 0L
+    private fun RemoteFile.remainingBytes(stagingDir: File, satisfiedPaths: Set<String>): Long {
+        if (path in satisfiedPaths) return 0L
 
         val staged = resolveInside(stagingDir, path)
         val part = File(staged.parentFile, "${staged.name}.part")

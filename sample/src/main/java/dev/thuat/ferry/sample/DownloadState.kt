@@ -28,10 +28,13 @@ sealed interface DownloadState {
     data class Interrupted(val stagedBytes: Long) : DownloadState
 
     /**
-     * Free space is being checked — a fast, local stat (`File.usableSpace`), not network time: the
-     * manifest has already been fetched by the time this ever fires. Skipped entirely on a cache
-     * hit, which needs no space check at all — a `Downloaded` row can arrive with no `CheckingSpace`
-     * in between (see `ProgressMapping.kt`'s own doc on `toDownloadState`).
+     * Free space is being checked — never network time, since the manifest has already been fetched
+     * by the time this ever fires, but not only a fast local stat (`File.usableSpace`) either: a
+     * resumed download credits whatever of a file is already staged and correct, and that credit
+     * check re-hashes every such file to decide, so a mostly-resumed multi-gigabyte model can spend
+     * real, visible time here re-reading disk before the first network request. Skipped entirely on
+     * a cache hit, which needs no space check at all — a `Downloaded` row can arrive with no
+     * `CheckingSpace` in between (see `ProgressMapping.kt`'s own doc on `toDownloadState`).
      */
     data object CheckingSpace : DownloadState
 
