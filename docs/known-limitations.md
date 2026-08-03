@@ -104,6 +104,17 @@ already-committed repo.
 
 Documented on `download`'s KDoc. Serialising is the caller's responsibility.
 
+**The same is true of `abandon` racing `download` for the same repo id — precisely, not just in
+spirit.** `download`'s loop recreates whatever directories it needs as it goes and verifies only the
+one file it is currently fetching, never one a previous iteration already verified and moved past. An
+`abandon` landing mid-loop deletes exactly those already-verified files out from under it; the loop
+does not know, does not re-fetch them, and every file it checks afterward still verifies fine on its
+own — so the commit at the end still succeeds. The consequence is not a failure either call could
+detect: it is `Result.success`, publishing a repo silently missing every file downloaded before the
+`abandon` landed. Serialising `abandon` against `download` for the same repo id is the caller's
+responsibility, documented on `abandon`'s own KDoc; nothing here enforces it, and no locking is added
+for it — the fix for this entry is the sentence you are reading, not code.
+
 **Narrowed for one caller: `:ferry-work`'s `enqueueRepoDownload`.** `:ferry` itself has no enqueue
 step to serialise at — a plain method call has nothing to deduplicate against. `:ferry-work`, the
 optional WorkManager module, does: `enqueueRepoDownload` wraps `WorkManager.enqueueUniqueWork` with

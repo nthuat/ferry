@@ -417,6 +417,19 @@ class RepoDownloader(
      * deleting staging on failure so a retry can resume from it; this is what reclaims the bytes when
      * no retry is coming.
      *
+     * **Not safe to call concurrently with [download] for the same [repoId] and [into].** `download`
+     * recreates whatever directories it needs as it goes (`destination.parentFile?.mkdirs()`) and
+     * verifies only the one file it is currently fetching — never a file a previous iteration of the
+     * same attempt already verified and moved past. An `abandon` landing mid-loop deletes exactly
+     * those already-verified files out from under it; the loop has no way to notice and does not
+     * re-fetch them, so every later file still verifies fine on its own, the commit at the end of
+     * `download` still finds everything *it* checked present and correct, and `stagingDir.renameTo`
+     * still succeeds. The result is `Result.success`, publishing a repo silently missing every file
+     * downloaded before the `abandon` landed — a committed partial model, not a failure either call
+     * could detect or report. Serialising `abandon` against `download` for the same repo id is the
+     * caller's responsibility, the same way two concurrent `download` calls are (see `download`'s own
+     * KDoc and docs/known-limitations.md's concurrency entry) — nothing here enforces it.
+     *
      * Deletes only [repoId]'s own staging directory under `into/.staging`, resolved through the same
      * [stagingDirFor] helper [download] uses to compute its own `stagingDir` — shared rather than
      * re-argued, so a hostile or malformed [repoId] cannot escape the staging area any more than it
