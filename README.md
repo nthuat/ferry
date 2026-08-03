@@ -11,7 +11,7 @@ Downloads AI model repositories to Android devices, and refuses to do it badly.
 **0.x note:** `RepoProgress` is a sealed interface, and pause — stopping a download on purpose and
 recording that, rather than as a failure — is still unimplemented (see Guarantee 4). Adding it later
 needs a new `RepoProgress` case, which breaks any consumer's exhaustive `when`. The hub interface
-(`ModelRepo`) is likewise expected to grow a real error taxonomy beyond a bare `IOException`. Both may
+(`ModelHub`) is likewise expected to grow a real error taxonomy beyond a bare `IOException`. Both may
 break before `1.0.0` — a deliberate use of what `0.x` means in semver, not instability.
 
 ```kotlin
@@ -178,10 +178,10 @@ per file:
 commit atomically     shared
 ```
 
-So a hub is one `ModelRepo` implementation, roughly forty lines:
+So a hub is one `ModelHub` implementation, roughly forty lines:
 
 ```kotlin
-interface ModelRepo {
+interface ModelHub {
     suspend fun manifest(repoId: String): Result<RepoManifest>
 }
 
@@ -252,14 +252,14 @@ collision. `OllamaTest` pins this exact manifest shape so it cannot regress unno
 
 HuggingFace and ModelScope are a hub and its mirror: they publish identical SHA-256 for identical
 content, so one can stand in for the other and be verified against the same expected hash. Two of
-those proves `ModelRepo` compiles against a second hub, not that it survives one — both are REST
+those proves `ModelHub` compiles against a second hub, not that it survives one — both are REST
 listings of named files with per-file content hashes; structurally, neither was ever going to break
 the interface.
 
 Ollama was added to find out whether a hub *could*. Its manifest is an OCI image manifest, not a
 directory listing: a layer is `mediaType` + `size` + `digest`, no filename anywhere, so
 `RemoteFile.path` has to be synthesized rather than read off the response — the one part of
-`ModelRepo` a HuggingFace-shaped hub can never exercise. It fit without contortion: `ModelRepo` and
+`ModelHub` a HuggingFace-shaped hub can never exercise. It fit without contortion: `ModelHub` and
 `RemoteFile` needed no change, which `RemoteFile.url`'s own KDoc already anticipated (it is
 adapter-resolved rather than derived from `path` precisely because "not every hub names its files").
 

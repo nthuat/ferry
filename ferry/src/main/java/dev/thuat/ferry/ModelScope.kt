@@ -32,7 +32,7 @@ class ModelScope(
     private val baseUrl: String = "https://modelscope.cn",
     private val revision: String = "master",
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
-) : ModelRepo {
+) : ModelHub {
 
     override suspend fun manifest(repoId: String): Result<RepoManifest> = withContext(dispatcher) {
         try {

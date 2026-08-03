@@ -94,7 +94,7 @@ class ResumableDownloader(
             // The .part file is deliberately left behind — it is the resume point.
             Result.failure(e)
         } catch (e: IllegalArgumentException) {
-            // Request.Builder.url throws this, not IOException, for a malformed URL. ModelRepo is a
+            // Request.Builder.url throws this, not IOException, for a malformed URL. ModelHub is a
             // public interface, so RemoteFile.url can come from a third-party adapter and reach here
             // as anything at all — and nothing may throw across this boundary.
             Result.failure(IOException("invalid url: $url", e))

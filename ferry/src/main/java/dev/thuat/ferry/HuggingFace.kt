@@ -22,7 +22,7 @@ class HuggingFace(
     private val client: OkHttpClient,
     private val baseUrl: String = "https://huggingface.co",
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
-) : ModelRepo {
+) : ModelHub {
 
     override suspend fun manifest(repoId: String): Result<RepoManifest> = withContext(dispatcher) {
         try {

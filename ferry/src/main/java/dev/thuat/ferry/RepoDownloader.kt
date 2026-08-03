@@ -131,7 +131,7 @@ private const val STAGING_SUFFIX = ".d"
  * half-written or half-correct.
  */
 class RepoDownloader(
-    private val repo: ModelRepo,
+    private val repo: ModelHub,
     private val downloader: ResumableDownloader,
     private val spaceCheck: SpaceCheck = SpaceCheck(),
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,

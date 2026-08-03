@@ -35,7 +35,7 @@ class RepoDownloaderTest {
     }
 
     /** A repo whose files are served by MockWebServer, with hashes computed rather than guessed. */
-    private fun fakeRepo(files: List<RemoteFile>) = object : ModelRepo {
+    private fun fakeRepo(files: List<RemoteFile>) = object : ModelHub {
         override suspend fun manifest(repoId: String) =
             Result.success(RepoManifest(repoId, files))
     }
