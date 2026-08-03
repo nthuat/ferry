@@ -1,28 +1,14 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
-    id("com.android.library")
-    id("org.jetbrains.kotlin.android")
+    id("java-library")
+    id("org.jetbrains.kotlin.jvm")
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
-android {
-    namespace = "dev.thuat.ferry"
-    compileSdk = 35
-
-    defaultConfig {
-        minSdk = 26
-        consumerProguardFiles("consumer-rules.pro")
-    }
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-    }
-
-    testOptions {
-        unitTests.isReturnDefaultValues = true
-    }
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
 }
 
 kotlin {
@@ -30,6 +16,17 @@ kotlin {
         jvmTarget.set(JvmTarget.JVM_17)
         // A library has no excuse for warnings its consumers will inherit.
         allWarningsAsErrors.set(true)
+    }
+    // java-library defaults Kotlin sources to src/{main,test}/kotlin. This module's history
+    // (git log --follow, eight defect fixes) lives under src/{main,test}/java — add it as a
+    // source dir rather than moving 18 files and severing that history.
+    sourceSets {
+        main {
+            kotlin.srcDir("src/main/java")
+        }
+        test {
+            kotlin.srcDir("src/test/java")
+        }
     }
 }
 
@@ -85,7 +82,10 @@ tasks.register("checkEmbeddable") {
     description = "Fails if Ferry gained a dependency that dictates how a host app is built."
     doLast {
         val offenders = configurations
-            .filter { it.isCanBeResolved && it.name.endsWith("RuntimeClasspath") }
+            // Android's variant configs are "debugRuntimeClasspath" / "releaseRuntimeClasspath"
+            // (capital R); java-library's plain, unvaried one is "runtimeClasspath" (lowercase r) —
+            // ignoreCase so the java-library conversion doesn't quietly empty this filter.
+            .filter { it.isCanBeResolved && it.name.endsWith("RuntimeClasspath", ignoreCase = true) }
             .flatMap { configuration ->
                 configuration.incoming.resolutionResult.allDependencies
                     .mapNotNull { it.requested as? org.gradle.api.artifacts.component.ModuleComponentSelector }

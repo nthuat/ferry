@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- :ferry is a plain JVM module as of the java-library conversion and can no longer carry this
+         permission itself; RepoDownloadWorker's network calls still need it, so it lives here now. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <!-- Required to run any foreground service (API 28+), and specifically a "dataSync"-typed one
          (API 34+) — see the <service> override below for why that type. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
