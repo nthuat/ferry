@@ -8,16 +8,17 @@ import dev.thuat.ferry.RepoProgress
  *
  * [sawTransfer] is threaded in rather than recomputed here because a lone `RepoProgress.Complete`
  * carries no memory of what happened earlier in the same attempt, and that memory is the only thing
- * that tells a cache hit apart from a redownload: `RepoDownloader.download`'s cache-hit path fires no
- * `CheckingSpace`, `Downloading` or `Verifying` event at all — it jumps straight to `Complete` (that
- * is what makes it the cheapest outcome, and more truthful: a cache hit never checks space, so it
- * never claims to), while a real transfer always fires at least one `Downloading` event first. The
- * caller sets [sawTransfer] to true the moment any `Downloading` event is seen, and leaves it true
- * for the rest of that attempt.
+ * that tells a cache hit apart from anything else: `RepoDownloader.download`'s cache-hit path fires
+ * no `CheckingSpace`, `Downloading`, `Skipped` or `Verifying` event at all — it jumps straight to
+ * `Complete` (that is what makes it the cheapest outcome, and more truthful: a cache hit never checks
+ * space, so it never claims to), while every other path reaches the per-file loop and fires at least
+ * one `Downloading` or `Skipped` event first — see [marksRealAttempt] for why both count equally. The
+ * caller sets [sawTransfer] to true the moment either is seen, and leaves it true for the rest of
+ * that attempt.
  *
- * [lastFileCount] is the most recent `Downloading.fileCount` the same caller has seen, for the same
- * reason: `Complete` carries no file count of its own, so a real transfer's live count has to arrive
- * this way or not at all. Null on a cache hit, where no `Downloading` event ever fires to supply one.
+ * [lastFileCount] is the most recent `fileCount` from either of those two events, for the same
+ * reason: `Complete` carries no file count of its own, so a real attempt's live count has to arrive
+ * this way or not at all. Null on a cache hit, where neither event ever fires to supply one.
  */
 fun RepoProgress.toDownloadState(sawTransfer: Boolean, lastFileCount: Int? = null): DownloadState = when (this) {
     is RepoProgress.CheckingSpace -> DownloadState.CheckingSpace
@@ -43,6 +44,23 @@ fun RepoProgress.toDownloadState(sawTransfer: Boolean, lastFileCount: Int? = nul
         fileCount = if (sawTransfer) lastFileCount else null,
     )
 }
+
+/**
+ * True for the two per-file events — [RepoProgress.Downloading] and [RepoProgress.Skipped] — that
+ * only fire once `download`'s per-file loop actually runs, unlike the whole-repo cache-hit shortcut,
+ * which fires [RepoProgress.Complete] alone.
+ *
+ * Branch review: `SampleViewModel.runDownload` used to latch its `sawTransfer` flag off
+ * [RepoProgress.Downloading] alone, so a resume where every file was already staged and correct —
+ * firing only [RepoProgress.Skipped], never [RepoProgress.Downloading] — reported
+ * `cacheHit = true` on completion. That claims the whole-repo shortcut ran, which checks nothing and
+ * writes nothing; what actually happened committed staging into the target directory via the exact
+ * same rename a real transfer ends with. `Skipped` counts the same as `Downloading` here because both
+ * are proof the loop — and therefore the commit — ran; only [RepoProgress.Complete] arriving with
+ * neither ever having fired is the real cache hit.
+ */
+val RepoProgress.marksRealAttempt: Boolean
+    get() = this is RepoProgress.Downloading || this is RepoProgress.Skipped
 
 /**
  * What this row should show once [dev.thuat.ferry.RepoDownloader.stagedBytes] is known for it —

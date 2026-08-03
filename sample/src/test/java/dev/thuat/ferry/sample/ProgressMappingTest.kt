@@ -4,6 +4,8 @@ import dev.thuat.ferry.InsufficientSpaceException
 import dev.thuat.ferry.RepoProgress
 import dev.thuat.ferry.SpaceReport
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
 import java.io.IOException
@@ -61,6 +63,33 @@ class ProgressMappingTest {
         val progress = RepoProgress.Skipped("owner/model", "config.json", fileIndex = 0, fileCount = 2)
 
         assertEquals(DownloadState.Verifying("config.json"), progress.toDownloadState(sawTransfer = false))
+    }
+
+    /**
+     * Branch review: an all-staged resume fires only `Skipped` events, never `Downloading`, but it
+     * still commits staging into the target directory via the same rename a real transfer ends with.
+     * `SampleViewModel.runDownload` used to latch its own `sawTransfer` flag off `Downloading` alone,
+     * so that resume reported `Downloaded(cacheHit = true)` — claiming the free whole-repo shortcut
+     * ran, when what actually happened committed a directory that did not exist, verified, before this
+     * call. `Skipped` must count the same as `Downloading` for that flag to be honest.
+     */
+    @Test
+    fun `marksRealAttempt is true for downloading and skipped, false for every other event`() {
+        val downloading = RepoProgress.Downloading(
+            repoId = "owner/model",
+            path = "model.safetensors",
+            fileIndex = 0,
+            fileCount = 1,
+            bytesWritten = 1L,
+            fileBytes = 2L,
+        )
+        val skipped = RepoProgress.Skipped("owner/model", "config.json", fileIndex = 0, fileCount = 2)
+
+        assertTrue(downloading.marksRealAttempt)
+        assertTrue(skipped.marksRealAttempt)
+        assertFalse(RepoProgress.CheckingSpace("owner/model").marksRealAttempt)
+        assertFalse(RepoProgress.Verifying("owner/model", "config.json").marksRealAttempt)
+        assertFalse(RepoProgress.Complete("owner/model", File("/tmp/owner/model")).marksRealAttempt)
     }
 
     @Test

@@ -226,10 +226,17 @@ class SampleViewModel(application: Application) : AndroidViewModel(application) 
         var lastFileCount: Int? = null
         try {
             val result = downloader.download(repoId, downloadRoot) { progress ->
-                if (progress is RepoProgress.Downloading) {
-                    sawTransfer = true
-                    lastFileCount = progress.fileCount
+                // marksRealAttempt: Skipped counts the same as Downloading here. An all-staged
+                // resume fires only Skipped, one per file, yet still commits staging into the
+                // target directory via the same rename a real transfer ends with — reporting that
+                // as a cache hit would claim the free whole-repo shortcut ran when it did not. See
+                // ProgressMapping.kt's own doc on marksRealAttempt.
+                when (progress) {
+                    is RepoProgress.Downloading -> lastFileCount = progress.fileCount
+                    is RepoProgress.Skipped -> lastFileCount = progress.fileCount
+                    else -> Unit
                 }
+                if (progress.marksRealAttempt) sawTransfer = true
                 if (throttle.shouldEmit(progress)) {
                     setRowState(repoId, progress.toDownloadState(sawTransfer, lastFileCount))
                 }
