@@ -53,6 +53,12 @@ includeBuild("../ferry")
 Or clone it and `include(":ferry")` directly. `:ferry-work` is optional and additive — take it only
 if you want WorkManager (see [Backgrounding](#backgrounding-ferry-work)).
 
+`:ferry` is a plain `java-library` module — no `android.*` reference anywhere in it, and nothing
+Android-specific to inherit. A direct `:ferry` consumer on Android declares its own
+`<uses-permission android:name="android.permission.INTERNET" />`; Ferry no longer ships a manifest to
+carry it for you. (`:ferry-work` still declares it, since it depends on `:ferry` and does the network
+call.)
+
 ## Why this exists
 
 Two of the most prominent on-device-LLM Android apps wrote the same downloader independently:
@@ -395,10 +401,11 @@ Full reasoning lives in `RepoDownloadWorker`'s own KDoc; this is the shape of ea
 ## Building
 
 ```bash
-./gradlew :ferry:testDebugUnitTest
+./gradlew :ferry:test
 ```
 
-Requires an Android SDK with API 35, and a JDK between 17 and 21.
+`:ferry` is a plain JVM module and needs only a JDK. Building the rest of the repo — `:ferry-work`
+and the `:sample` app — additionally requires an Android SDK with API 35, and a JDK between 17 and 21.
 
 The upper bound is Gradle 8.9's, not this project's: a newer JDK fails during script compilation
 with a bare `IllegalArgumentException` naming the JDK's own version and nothing else, which is not
