@@ -1,6 +1,5 @@
 package dev.thuat.ferry
 
-import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
@@ -31,10 +30,13 @@ class ModelScope(
     private val client: OkHttpClient,
     private val baseUrl: String = "https://modelscope.cn",
     private val revision: String = "master",
-    private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) : ModelHub {
 
-    override suspend fun manifest(repoId: String): Result<RepoManifest> = withContext(dispatcher) {
+    // Dispatchers.IO directly, not a constructor-injected dispatcher — see HuggingFace.manifest's own
+    // comment for why: no test and no consumer ever passed one, RepoDownloader.download already wraps
+    // this in withContext(its own dispatcher), and this stays an explicit withContext rather than
+    // being dropped because docs/known-limitations.md contemplates a host calling it directly.
+    override suspend fun manifest(repoId: String): Result<RepoManifest> = withContext(Dispatchers.IO) {
         try {
             val base = baseUrl.toHttpUrlOrNull()
                 ?: return@withContext Result.failure(IOException("invalid base URL: $baseUrl"))
