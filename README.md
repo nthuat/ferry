@@ -11,6 +11,8 @@ resumes across process death.
 
 ```kotlin
 implementation("dev.thuat:ferry:0.1.0")
+// Optional and additive. Only if you want WorkManager backgrounding:
+implementation("dev.thuat:ferry-work:0.1.0")
 ```
 
 ```kotlin
