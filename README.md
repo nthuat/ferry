@@ -5,8 +5,8 @@ Downloads AI model repositories to Android devices, and refuses to do it badly.
 > **Status: core works.** Fetches a HuggingFace, ModelScope or Ollama repo, refuses to start without
 > the disk space to finish it, and verifies every published SHA-256 before committing anything.
 > Backgrounding is available as the optional `:ferry-work` module (see below); a failed or
-> interrupted download resumes across process death — pause is the one still not done. Not published
-> to Maven.
+> interrupted download resumes across process death — pause is the one still not done. On Maven
+> Central as `dev.thuat:ferry:0.1.0`.
 
 **0.x note:** `RepoProgress` is a sealed interface, and pause — stopping a download on purpose and
 recording that, rather than as a failure — is still unimplemented (see Guarantee 4). Adding it later
@@ -46,31 +46,23 @@ client it built behind your back.
 
 ## Getting it
 
-Not on Maven Central yet. The coordinates are settled — `dev.thuat:ferry` and `dev.thuat:ferry-work`,
-currently `0.1.0` — and `dev.thuat` is reserved: this project's owner owns `thuat.dev`. Both modules'
-`build.gradle.kts` already carry the full publishing setup (`maven-publish`, `signing`, sources and
-javadoc jars, a POM with name/description/url/licenses/developers/scm — see
-`gradle/publishing.gradle.kts` for the parts shared between them). What is still missing is entirely
-account and credential setup, not code:
+```kotlin
+dependencies {
+    implementation("dev.thuat:ferry:0.1.0")
+    // Optional, additive — only if you want WorkManager backgrounding:
+    implementation("dev.thuat:ferry-work:0.1.0")
+}
+```
 
-- A Sonatype Central Portal account, with the `dev.thuat` namespace claimed on it.
-- A DNS TXT record on `thuat.dev` proving ownership of that namespace to Central Portal.
-- A GPG key pair, published to a public keyserver. Its ASCII-armored private key and passphrase go in
-  `signingInMemoryKey` / `signingInMemoryKeyPassword`; a Central Portal user token goes in
-  `mavenCentralUsername` / `mavenCentralPassword`. All four are read from a Gradle property or an
-  environment variable of the same name (`gradle/publishing.gradle.kts`), with no default — so
-  building or testing this repository, including `./gradlew :ferry:publishToMavenLocal`, needs none of
-  them. A contributor cloning this never needs a signing key.
+`:ferry-work` depends on `:ferry`, so taking it gets you both (see
+[Backgrounding](#backgrounding-ferry-work)).
 
-Until it's actually published, a composite build is the way to depend on it without vendoring a copy:
+A composite build still works if you want to develop against a local checkout:
 
 ```kotlin
 // settings.gradle.kts
 includeBuild("../ferry")
 ```
-
-Or clone it and `include(":ferry")` directly. `:ferry-work` is optional and additive — take it only
-if you want WorkManager (see [Backgrounding](#backgrounding-ferry-work)).
 
 `:ferry` is a plain `java-library` module — no `android.*` reference anywhere in it, and nothing
 Android-specific to inherit. A direct `:ferry` consumer on Android declares its own
@@ -434,6 +426,33 @@ message:
 ```bash
 JAVA_HOME=/path/to/jdk-21 ./gradlew :ferry:check
 ```
+
+### Releasing
+
+Four credentials drive publication, all read from a Gradle property or an environment variable of the
+same name in SCREAMING_SNAKE_CASE (`gradle/publishing.gradle.kts`), none with a default:
+`signingInMemoryKey` and `signingInMemoryKeyPassword` hold an ASCII-armored GPG private key whose
+public half is on a keyserver, and `mavenCentralUsername` / `mavenCentralPassword` hold a Central
+Portal user token. Absent, nothing breaks and no `Sign` task is even registered — building, testing
+and `./gradlew publishToMavenLocal` all work with none of them, so a contributor cloning this never
+needs a signing key.
+
+With them set, a release is: tag the commit, deploy, promote, publish.
+
+```bash
+git tag -a v0.1.1 -m "0.1.1" && git push origin v0.1.1
+JAVA_HOME=/path/to/jdk-21 ./gradlew publishAllPublicationsToMavenCentralRepository
+curl -X POST -H "Authorization: Bearer $(printf '%s:%s' "$PORTAL_USER" "$PORTAL_TOKEN" | base64)" \
+  "https://ossrh-staging-api.central.sonatype.com/manual/upload/defaultRepository/dev.thuat"
+```
+
+Then Publish the deployment at central.sonatype.com/publishing/deployments. Everything before that
+button is reversible; a released version never is.
+
+Both modules must go up in one Gradle invocation, so they share a staging repository — Central
+validates `ferry-work`'s dependency on `ferry` within the deployment. Note also that the promote
+endpoint is scoped to the whole `dev.thuat` namespace, not to this project: it sweeps up anything
+else sitting unpromoted in that namespace's default staging repository.
 
 ## License
 
