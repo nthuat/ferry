@@ -1,5 +1,8 @@
 # Ferry
 
+[![Maven Central](https://img.shields.io/maven-central/v/dev.thuat/ferry)](https://central.sonatype.com/artifact/dev.thuat/ferry)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+
 Downloads AI model repositories to Android devices, and refuses to do it badly.
 
 > **Status: core works.** Fetches a HuggingFace, ModelScope or Ollama repo, refuses to start without
