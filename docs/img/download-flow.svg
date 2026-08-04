@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 570" width="980" height="570" font-family="Virgil, 'Comic Sans MS', 'Chalkboard SE', 'Segoe Print', cursive">
+  <rect x="0" y="0" width="980" height="570" fill="#fffdf7"/>
+
+  <text x="40" y="46" font-size="23" fill="#1e1e1e">One download, start to committed</text>
+
+  <!-- hub box -->
+  <path d="M 42,82 L 238,79 L 241,164 L 43,167 Z" fill="#a5d8ff" fill-opacity="0.35" stroke="#1971c2" stroke-width="2.2" stroke-linejoin="round"/>
+  <text x="140" y="110" font-size="16" fill="#1e1e1e" text-anchor="middle">HuggingFace</text>
+  <text x="140" y="132" font-size="16" fill="#1e1e1e" text-anchor="middle">ModelScope</text>
+  <text x="140" y="154" font-size="16" fill="#1e1e1e" text-anchor="middle">Ollama</text>
+
+  <!-- hub -> diamond -->
+  <path d="M 243,122 Q 300,119 357,123" fill="none" stroke="#1e1e1e" stroke-width="2" stroke-linecap="round"/>
+  <path d="M 345,117 L 357,123 L 345,129" fill="none" stroke="#1e1e1e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="300" y="108" font-size="14" fill="#495057" text-anchor="middle">manifest</text>
+  <text x="300" y="147" font-size="13" fill="#868e96" text-anchor="middle">paths + sha256</text>
+
+  <!-- decision diamond -->
+  <path d="M 450,62 L 541,124 L 449,185 L 359,122 Z" fill="#ffec99" fill-opacity="0.4" stroke="#1e1e1e" stroke-width="2.2" stroke-linejoin="round"/>
+  <text x="450" y="118" font-size="15" fill="#1e1e1e" text-anchor="middle">enough free</text>
+  <text x="450" y="140" font-size="15" fill="#1e1e1e" text-anchor="middle">space?</text>
+
+  <!-- no -> exception -->
+  <path d="M 543,123 Q 580,120 617,123" fill="none" stroke="#e03131" stroke-width="2" stroke-linecap="round"/>
+  <path d="M 605,117 L 617,123 L 605,129" fill="none" stroke="#e03131" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="580" y="110" font-size="14" fill="#e03131" text-anchor="middle">no</text>
+
+  <path d="M 622,81 L 938,78 L 941,163 L 623,166 Z" fill="#ffc9c9" fill-opacity="0.35" stroke="#e03131" stroke-width="2.2" stroke-linejoin="round"/>
+  <text x="781" y="114" font-size="15" fill="#1e1e1e" text-anchor="middle">InsufficientSpaceException</text>
+  <text x="781" y="140" font-size="14" fill="#495057" text-anchor="middle">zero bytes moved</text>
+
+  <!-- yes -> staging -->
+  <path d="M 450,187 Q 452,201 450,213" fill="none" stroke="#1e1e1e" stroke-width="2" stroke-linecap="round"/>
+  <path d="M 444,201 L 450,213 L 456,201" fill="none" stroke="#1e1e1e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="466" y="206" font-size="14" fill="#495057">yes</text>
+
+  <!-- staging container -->
+  <path d="M 62,217 L 558,214 L 561,473 L 61,476 Z" fill="none" stroke="#6741d9" stroke-width="2.2" stroke-dasharray="9 7" stroke-linejoin="round"/>
+  <text x="78" y="243" font-size="15" fill="#6741d9">staging   &lt;into&gt;/.ferry-staging/&lt;repoId&gt;/</text>
+  <text x="90" y="268" font-size="13" fill="#868e96">per file:</text>
+
+  <!-- .part box -->
+  <path d="M 92,282 L 338,279 L 341,342 L 91,345 Z" fill="#d0bfff" fill-opacity="0.3" stroke="#1e1e1e" stroke-width="2.2" stroke-linejoin="round"/>
+  <text x="215" y="308" font-size="15" fill="#1e1e1e" text-anchor="middle">model.safetensors.part</text>
+  <text x="215" y="330" font-size="13" fill="#868e96" text-anchor="middle">resumes via Range</text>
+
+  <!-- verify arrow -->
+  <path d="M 215,346 Q 217,368 215,388" fill="none" stroke="#2f9e44" stroke-width="2" stroke-linecap="round"/>
+  <path d="M 209,376 L 215,388 L 221,376" fill="none" stroke="#2f9e44" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="230" y="372" font-size="14" fill="#2f9e44">sha256 ✓</text>
+
+  <!-- verified box -->
+  <path d="M 92,392 L 338,389 L 341,450 L 91,453 Z" fill="#b2f2bb" fill-opacity="0.35" stroke="#2f9e44" stroke-width="2.2" stroke-linejoin="round"/>
+  <text x="215" y="418" font-size="15" fill="#1e1e1e" text-anchor="middle">model.safetensors</text>
+  <text x="215" y="439" font-size="13" fill="#868e96" text-anchor="middle">verified, final name</text>
+
+  <!-- durability note -->
+  <text x="368" y="302" font-size="14" fill="#6741d9">process death here?</text>
+  <text x="368" y="326" font-size="14" fill="#6741d9">staging survives.</text>
+  <text x="368" y="350" font-size="14" fill="#6741d9">the next download</text>
+  <text x="368" y="374" font-size="14" fill="#6741d9">resumes from these</text>
+  <text x="368" y="398" font-size="14" fill="#6741d9">bytes, not from zero.</text>
+
+  <!-- commit arrow -->
+  <path d="M 565,346 Q 640,343 712,347" fill="none" stroke="#1e1e1e" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M 700,341 L 712,347 L 700,353" fill="none" stroke="#1e1e1e" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="638" y="294" font-size="13" fill="#1e1e1e" text-anchor="middle">one atomic rename</text>
+
+  <!-- final box -->
+  <path d="M 717,307 L 949,304 L 952,394 L 716,397 Z" fill="#b2f2bb" fill-opacity="0.3" stroke="#2f9e44" stroke-width="2.4" stroke-linejoin="round"/>
+  <text x="834" y="338" font-size="16" fill="#1e1e1e" text-anchor="middle">&lt;into&gt;/&lt;repoId&gt;/</text>
+  <text x="834" y="362" font-size="13" fill="#495057" text-anchor="middle">complete or absent,</text>
+  <text x="834" y="382" font-size="13" fill="#495057" text-anchor="middle">never partial</text>
+
+  <text x="62" y="516" font-size="14" fill="#495057">Guarantee 3 refuses before byte one. Guarantees 1 and 2 live in that one rename.</text>
+</svg>

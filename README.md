@@ -47,6 +47,10 @@ travels through your interceptors, your timeouts and your proxy config.
 `:ferry` is a plain `java-library` module with no `android.*` reference in it, so a consumer on
 Android declares its own `<uses-permission android:name="android.permission.INTERNET" />`.
 
+## How a download works
+
+![Ferry resolves a manifest from the hub, refuses up front if the disk cannot hold it, downloads each file into a staging directory where a .part resumes via Range and is renamed only after its sha256 verifies, then commits the whole repo with one atomic rename](docs/img/download-flow.svg)
+
 ## Guarantees
 
 Not a feature list. Promises the implementation holds and the tests enforce.
