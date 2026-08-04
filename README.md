@@ -442,7 +442,7 @@ With them set, a release is: tag the commit, deploy, promote, publish.
 ```bash
 git tag -a v0.1.1 -m "0.1.1" && git push origin v0.1.1
 JAVA_HOME=/path/to/jdk-21 ./gradlew publishAllPublicationsToMavenCentralRepository
-curl -X POST -H "Authorization: Bearer $(printf '%s:%s' "$USER" "$TOKEN" | base64)" \
+curl -X POST -H "Authorization: Bearer $(printf '%s:%s' "$PORTAL_USER" "$PORTAL_TOKEN" | base64)" \
   "https://ossrh-staging-api.central.sonatype.com/manual/upload/defaultRepository/dev.thuat"
 ```
 
