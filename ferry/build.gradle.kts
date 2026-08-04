@@ -50,7 +50,12 @@ dependencies {
     // client — which is the property EmbeddabilityTest exists to guarantee, and which that test
     // cannot observe because it compiles inside this module.
     api("com.squareup.okhttp3:okhttp:4.12.0")
-    api("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // -core, not -android: this module is plain JVM and uses only Dispatchers.IO — the -android
+    // artifact adds nothing but the Android Main dispatcher, which nothing here touches, and on an
+    // api configuration every consumer inherits it, including a JVM one that can never load it.
+    // An Android consumer that wants Dispatchers.Main already has it: androidx.work:work-runtime-ktx,
+    // which :ferry-work depends on, brings kotlinx-coroutines-android itself.
+    api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
     // Stays implementation: serialization appears in no public signature, only inside HuggingFace.
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
 
@@ -81,9 +86,10 @@ val architectureDictatingDependencies = listOf(
 val okhttpApiDependency = "com.squareup.okhttp3:okhttp"
 
 /**
- * CoroutineDispatcher itself lives in kotlinx-coroutines-core; -android is today's choice of
- * artifact, not the requirement. A future switch to declaring core directly is legitimate and must
- * not false-fail this check, so either satisfies it.
+ * CoroutineDispatcher itself lives in kotlinx-coroutines-core, which is what this module declares.
+ * -android is the same types plus a Main dispatcher this module never uses; a host is free to add it
+ * on its own side, and an earlier version of this file declared it here, so either satisfies this
+ * check rather than false-failing on an artifact choice that was never the requirement.
  */
 val coroutineDispatcherApiDependencies = listOf(
     "org.jetbrains.kotlinx:kotlinx-coroutines-android",
