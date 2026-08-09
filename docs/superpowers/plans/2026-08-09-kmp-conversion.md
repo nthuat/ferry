@@ -530,7 +530,9 @@ git add -A ferry/src ferry/build.gradle.kts
 git commit -m "refactor: ResumableDownloader on Ktor streaming + Okio FileHandle"
 ```
 
----### Task 4: RepoDownloader → Okio FileSystem
+---
+
+### Task 4: RepoDownloader → Okio FileSystem
 
 **Files:**
 - Modify: `ferry/src/main/java/dev/thuat/ferry/RepoDownloader.kt` (full port)
