@@ -3,6 +3,7 @@ package dev.thuat.ferry
 import kotlinx.coroutines.runBlocking
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okio.Path.Companion.toOkioPath
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -41,9 +42,9 @@ class FerryTest {
         server.enqueue(MockResponse().setBody(configBody))
 
         val ferry = Ferry.huggingFace(baseUrl = server.url("/").toString().trimEnd('/'))
-        val dir = runBlocking { ferry.download("Qwen/Q-0.5B", temp.root) }.getOrThrow()
+        val dir = runBlocking { ferry.download("Qwen/Q-0.5B", temp.root.toOkioPath()) }.getOrThrow()
 
-        assertEquals(configBody, File(dir, "config.json").readText())
+        assertEquals(configBody, File(dir.toFile(), "config.json").readText())
     }
 
     @Test
@@ -53,7 +54,7 @@ class FerryTest {
 
         val seen = mutableListOf<RepoProgress>()
         val ferry = Ferry.huggingFace(baseUrl = server.url("/").toString().trimEnd('/'))
-        runBlocking { ferry.download("Qwen/Q-0.5B", temp.root) { seen += it } }
+        runBlocking { ferry.download("Qwen/Q-0.5B", temp.root.toOkioPath()) { seen += it } }
 
         assertTrue(seen.last() is RepoProgress.Complete)
     }
@@ -63,7 +64,7 @@ class FerryTest {
         server.enqueue(MockResponse().setResponseCode(404))
 
         val ferry = Ferry.huggingFace(baseUrl = server.url("/").toString().trimEnd('/'))
-        val result = runBlocking { ferry.download("nope/nope", temp.root) }
+        val result = runBlocking { ferry.download("nope/nope", temp.root.toOkioPath()) }
 
         assertTrue(result.isFailure)
     }

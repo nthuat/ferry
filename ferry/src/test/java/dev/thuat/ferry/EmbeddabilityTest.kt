@@ -5,6 +5,7 @@ import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okio.Path.Companion.toOkioPath
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -75,7 +76,7 @@ class EmbeddabilityTest {
             client = hostClient,
             baseUrl = server.url("/").toString().trimEnd('/'),
         )
-        runBlocking { ferry.download("Qwen/Q-0.5B", temp.root) }
+        runBlocking { ferry.download("Qwen/Q-0.5B", temp.root.toOkioPath()) }
 
         assertEquals(
             "manifest and file requests must both be visible to the host",
@@ -104,7 +105,7 @@ class EmbeddabilityTest {
             client = hostClient,
             baseUrl = server.url("/").toString().trimEnd('/'),
         )
-        runBlocking { ferry.download("owner/model", temp.root) }
+        runBlocking { ferry.download("owner/model", temp.root.toOkioPath()) }
 
         assertEquals(
             "manifest and file requests must both be visible to the host",
@@ -133,7 +134,7 @@ class EmbeddabilityTest {
             client = hostClient,
             baseUrl = server.url("/").toString().trimEnd('/'),
         )
-        runBlocking { ferry.download("qwen2.5:0.5b", temp.root) }
+        runBlocking { ferry.download("qwen2.5:0.5b", temp.root.toOkioPath()) }
 
         assertEquals(
             "manifest and blob requests must both be visible to the host",
@@ -157,7 +158,7 @@ class EmbeddabilityTest {
         val progress = mutableListOf<RepoProgress>()
         val result = runBlocking {
             Ferry.huggingFace(baseUrl = server.url("/").toString().trimEnd('/'))
-                .download("Qwen/Q-0.5B", temp.root) { progress += it }
+                .download("Qwen/Q-0.5B", temp.root.toOkioPath()) { progress += it }
         }
 
         assertTrue(result.isSuccess)

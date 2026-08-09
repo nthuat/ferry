@@ -5,9 +5,11 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okio.FileSystem
-import okio.Path.Companion.toOkioPath
-import java.io.File
-import java.io.IOException
+import okio.IOException
+import okio.Path
+
+/** java.io.File.length() semantics: 0 for a missing path — call sites compare against it. */
+private fun FileSystem.sizeOf(path: Path): Long = metadataOrNull(path)?.size ?: 0L
 
 /** What the download is doing, at a granularity a progress UI can render without guessing. */
 sealed interface RepoProgress {
@@ -43,7 +45,7 @@ sealed interface RepoProgress {
 
     data class Verifying(val repoId: String, val path: String) : RepoProgress
 
-    data class Complete(val repoId: String, val dir: File) : RepoProgress
+    data class Complete(val repoId: String, val dir: Path) : RepoProgress
 }
 
 /** Carries the report so a caller can say how much space is missing, not merely that some is. */
@@ -137,6 +139,7 @@ class RepoDownloader(
     private val repo: ModelHub,
     private val downloader: ResumableDownloader,
     private val spaceCheck: SpaceCheck = SpaceCheck(),
+    private val fileSystem: FileSystem = FileSystem.SYSTEM,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
 
@@ -156,13 +159,13 @@ class RepoDownloader(
      */
     suspend fun download(
         repoId: String,
-        into: File,
+        into: Path,
         onProgress: (RepoProgress) -> Unit = {},
-    ): Result<File> = withContext(dispatcher) {
+    ): Result<Path> = withContext(dispatcher) {
         try {
             // Inside the try, not before it: `repo` is a third-party ModelHub (its own KDoc), and
             // nothing stops an implementation from throwing instead of returning Result.failure — a
-            // call site before this try let that throw escape download()'s own Result<File> contract
+            // call site before this try let that throw escape download()'s own Result<Path> contract
             // entirely. A throw here is now caught below like any other failure in this method.
             // asDownloadFailure also normalises the well-behaved-looking case: a hub can return
             // Result.failure(anything), an untyped Throwable that need not be an IOException, and
@@ -192,23 +195,23 @@ class RepoDownloader(
             //
             // Staging is durable scratch, not a transaction log: a failed attempt leaves it exactly
             // as far as it got, on disk, deliberately, so the next attempt can resume from those
-            // bytes instead of re-fetching them. Success consumes it — stagingDir.renameTo(target)
-            // below moves it out from under this path entirely, so there is nothing left afterward
-            // to clean up. A failure is not cleaned up here; Task 3 adds the explicit abandonStaging()
-            // that reclaims a staging directory the caller has given up on.
+            // bytes instead of re-fetching them. Success consumes it — fileSystem.atomicMove(stagingDir,
+            // target) below moves it out from under this path entirely, so there is nothing left
+            // afterward to clean up. A failure is not cleaned up here; Task 3 adds the explicit
+            // abandonStaging() that reclaims a staging directory the caller has given up on.
             //
             // stagingDir is not a bare resolveInside(stagingRoot, repoId): "owner" and "owner/model"
             // are both ordinary repo ids (MARKER_FILE's own doc), and staging has no shadow tree the
             // way target's own nesting question does (MARKER_ROOT) — see stagingDirFor's own doc for
             // the Critical that caused and the reserved per-id suffix that closes it.
-            val stagingRoot = File(into, ".staging")
+            val stagingRoot = into / ".staging"
             val stagingDir = stagingDirFor(stagingRoot, repoId)
             val target = resolveInside(into, repoId)
 
             // Which ids are committed *nested inside* repoId — see MARKER_ROOT's doc for the shape
             // and why it is a separate tree from the ownership marker. markerDir is repoId's own
             // slot: empty until something nests inside it, at which point it gains a child.
-            val markerRoot = File(into, MARKER_ROOT)
+            val markerRoot = into / MARKER_ROOT
             val markerDir = resolveInside(markerRoot, repoId)
 
             // A repoId of ".staging/evil" or ".ferry/evil" never leaves `into` (so resolveInside's
@@ -216,11 +219,10 @@ class RepoDownloader(
             // namespace `into` reserves for Ferry's own bookkeeping — staging or markers — which
             // would let one repo's commit clobber another repo's in-flight staging copy, or the
             // marker namespace itself, rather than just being an ordinary sibling directory.
-            val targetPath = target.canonicalPath
-            if (collidesWith(targetPath, stagingRoot)) {
+            if (collidesWith(target, stagingRoot)) {
                 throw IOException("repo id collides with the staging area: $repoId")
             }
-            if (collidesWith(targetPath, markerRoot)) {
+            if (collidesWith(target, markerRoot)) {
                 throw IOException("repo id collides with the marker directory: $repoId")
             }
 
@@ -235,7 +237,7 @@ class RepoDownloader(
             // space at all, and must not be refused because the device that already holds it has
             // since filled up. Nothing above this line writes anything, so a hit is returned here
             // having touched the filesystem only to read it.
-            if (target.isDirectory && manifest.isSatisfiedBy(target)) {
+            if (fileSystem.metadataOrNull(target)?.isDirectory == true && manifest.isSatisfiedBy(target)) {
                 onProgress(RepoProgress.Complete(repoId, target))
                 return@withContext Result.success(target)
             }
@@ -270,12 +272,12 @@ class RepoDownloader(
             val satisfiedPaths = manifest.files
                 .filter { it.isSatisfiedIn(stagingDir) }
                 .mapTo(HashSet()) { it.path }
-            val report = spaceCheck.check(manifest.creditingStaged(stagingDir, satisfiedPaths), into.toOkioPath())
+            val report = spaceCheck.check(manifest.creditingStaged(stagingDir, satisfiedPaths), into)
             if (!report.sufficient) {
                 return@withContext Result.failure(InsufficientSpaceException(report))
             }
 
-            stagingDir.mkdirs()
+            fileSystem.createDirectories(stagingDir)
 
             // Durable staging (kept since Task 1) can carry scratch from a manifest this attempt no
             // longer agrees with. Pruned before the loop below touches anything, so a stale file
@@ -293,23 +295,23 @@ class RepoDownloader(
                 // asked a second time: isSatisfiedIn re-hashes a bare staged file to reach this
                 // answer, and asking it again per file here — after the space check had already
                 // asked it for every file — hashed every staged byte twice for no new information.
-                // A bare destination.exists() would count a staged file as done because a file
-                // happens to sit at that path, committing whatever bytes are actually there unread —
-                // the drift between "counted as progress" and "skipped" that this file's own history
-                // (docs/known-limitations.md) warns is how a repo ends up committed and then failing
-                // its own cache check forever; satisfiedPaths only ever contains a path isSatisfiedIn
-                // actually verified, so a staged file that merely exists but does not match still
-                // falls through to an ordinary fetch below.
+                // A bare fileSystem.exists(destination) would count a staged file as done because a
+                // file happens to sit at that path, committing whatever bytes are actually there
+                // unread — the drift between "counted as progress" and "skipped" that this file's own
+                // history (docs/known-limitations.md) warns is how a repo ends up committed and then
+                // failing its own cache check forever; satisfiedPaths only ever contains a path
+                // isSatisfiedIn actually verified, so a staged file that merely exists but does not
+                // match still falls through to an ordinary fetch below.
                 if (remote.path in satisfiedPaths) {
                     onProgress(RepoProgress.Skipped(repoId, remote.path, index, manifest.files.size))
                     return@forEachIndexed
                 }
 
-                destination.parentFile?.mkdirs()
+                destination.parent?.let { fileSystem.createDirectories(it) }
 
                 downloader.download(
                     url = remote.url,
-                    target = destination.toOkioPath(),
+                    target = destination,
                 ) { written, _ ->
                     onProgress(
                         RepoProgress.Downloading(
@@ -334,28 +336,28 @@ class RepoDownloader(
                 //
                 // Unconditional, not guarded on `remote.sizeBytes > 0` as this once was: that guard
                 // treated a declared 0 as "unknown, skip the check", but isSatisfiedBy below has never
-                // had a matching guard — it compares onDisk.length() == remote.sizeBytes unconditionally
-                // — so the two disagreed. A hub declaring an explicit 0 could pass a non-empty body
-                // here and then fail isSatisfiedBy on every later call forever: committed once, never a
-                // cache hit again (docs/known-limitations.md's closed entry on this). Dropping the guard
-                // here instead treats a declared 0 the same way isSatisfiedBy always has: a real
-                // assertion that the file is empty, checked, not an "unknown size" sentinel skipped.
-                // Neither HuggingFace nor ModelScope was ever observed omitting a real file's size this
-                // way — both always publish an explicit figure for a "file"/"blob" entry — so this
-                // costs neither adapter anything today; it only stops trusting a hub that starts
-                // publishing a real, checkable zero.
-                if (destination.length() != remote.sizeBytes) {
+                // had a matching guard — it compares fileSystem.sizeOf(onDisk) == remote.sizeBytes
+                // unconditionally — so the two disagreed. A hub declaring an explicit 0 could pass a
+                // non-empty body here and then fail isSatisfiedBy on every later call forever:
+                // committed once, never a cache hit again (docs/known-limitations.md's closed entry on
+                // this). Dropping the guard here instead treats a declared 0 the same way isSatisfiedBy
+                // always has: a real assertion that the file is empty, checked, not an "unknown size"
+                // sentinel skipped. Neither HuggingFace nor ModelScope was ever observed omitting a
+                // real file's size this way — both always publish an explicit figure for a
+                // "file"/"blob" entry — so this costs neither adapter anything today; it only stops
+                // trusting a hub that starts publishing a real, checkable zero.
+                if (fileSystem.sizeOf(destination) != remote.sizeBytes) {
                     return@withContext Result.failure(
                         VerificationException(
                             remote.path,
-                            "expected ${remote.sizeBytes} bytes, got ${destination.length()}",
+                            "expected ${remote.sizeBytes} bytes, got ${fileSystem.sizeOf(destination)}",
                         ),
                     )
                 }
 
                 // A null sha256 means the hub published none; the size check above is then the only
                 // acceptance test, which is weaker and unavoidable.
-                if (remote.sha256 != null && !Sha256.matches(FileSystem.SYSTEM, destination.toOkioPath(), remote.sha256)) {
+                if (remote.sha256 != null && !Sha256.matches(fileSystem, destination, remote.sha256)) {
                     return@withContext Result.failure(
                         VerificationException(remote.path, "sha256 mismatch"),
                     )
@@ -371,13 +373,14 @@ class RepoDownloader(
             // ownership of a directory — Ferry's own write always lands last, overwriting it. A
             // manifest entry named ".ferry" *in a subdirectory* is not shadowed by this at all and
             // downloads as ordinary content: this write only ever touches stagingDir's own root.
-            File(stagingDir, MARKER_FILE).writeText(repoId)
+            fileSystem.write(stagingDir / MARKER_FILE) { writeUtf8(repoId) }
 
-            if (target.exists()) {
+            if (fileSystem.exists(target)) {
                 // An absent marker is a refusal, not an exception: something Ferry did not write is
                 // sitting here, and that is precisely what must not be deleted to make room.
-                val marker = File(target, MARKER_FILE)
-                if (!marker.isFile || marker.readText() != repoId) {
+                val marker = target / MARKER_FILE
+                val markerIsFile = fileSystem.metadataOrNull(marker)?.isRegularFile == true
+                if (!markerIsFile || fileSystem.read(marker) { readUtf8() } != repoId) {
                     throw IOException(
                         "$target was not committed by Ferry under '$repoId'; refusing to replace " +
                             "it — remove the directory to retry",
@@ -400,11 +403,12 @@ class RepoDownloader(
                 // ambiguous, because only Ferry ever writes there, but they are not proof either: a
                 // shadow entry is never deleted, so it can name an id whose real directory was since
                 // removed out of band, or one whose commit crashed before ever creating it. Cross-
-                // referencing each candidate against `File(target, candidate.name).exists()` is what
-                // tells a genuinely-nested repo apart from a stale entry — real content wins the
+                // referencing each candidate against `fileSystem.exists(target / candidate.name)` is
+                // what tells a genuinely-nested repo apart from a stale entry — real content wins the
                 // refusal, a stale entry loses it and blocks nothing, which is also what makes
                 // removing the nested repo the refusal names actually clear that refusal afterwards.
-                val nestedChild = markerDir.listFiles()?.firstOrNull { File(target, it.name).exists() }
+                val nestedChild = (fileSystem.listOrNull(markerDir) ?: emptyList())
+                    .firstOrNull { fileSystem.exists(target / it.name) }
                 if (nestedChild != null) {
                     throw IOException(
                         "$target contains a repo committed under '$repoId/${nestedChild.name}'; " +
@@ -412,9 +416,7 @@ class RepoDownloader(
                     )
                 }
 
-                if (!target.deleteRecursively()) {
-                    return@withContext Result.failure(IOException("cannot replace $target"))
-                }
+                fileSystem.deleteRecursively(target)
             }
 
             // Records repoId itself as a candidate nested id for whichever ancestor id, if any, is
@@ -423,17 +425,14 @@ class RepoDownloader(
             // exist yet, which the nested check above already treats as a stale, harmless candidate.
             // The other order would leave the opposite: real, committed content with no shadow entry
             // at all, invisible to an ancestor's nested check, which would then delete it for real —
-            // the one direction that actually loses something that was there. Only one mkdirs() call,
-            // not a write too: nothing is ever read back out of this tree's own content, only its
+            // the one direction that actually loses something that was there. Only one createDirectories()
+            // call, not a write too: nothing is ever read back out of this tree's own content, only its
             // shape, so recording repoId here needs nothing more than the directory existing.
-            markerDir.mkdirs()
-            if (!markerDir.isDirectory) {
-                return@withContext Result.failure(IOException("cannot record $repoId as committed"))
-            }
+            fileSystem.createDirectories(markerDir)
 
             // Final check, immediately before the rename that publishes this repo. Cheap on purpose:
-            // one File.length() per manifest file, no hashing — every byte was already verified once
-            // by the loop above, and re-reading gigabytes here would be the wrong trade. The only
+            // one fileSystem.sizeOf per manifest file, no hashing — every byte was already verified
+            // once by the loop above, and re-reading gigabytes here would be the wrong trade. The only
             // thing this catches is staging changing *after* the loop already verified it, which the
             // loop itself has no way to see: `abandonStaging` racing this call deletes exactly the
             // files the loop already verified and moved past (docs/known-limitations.md), and two
@@ -443,7 +442,7 @@ class RepoDownloader(
             // whatever vanished, as Result.success. This turns that into a clean Result.failure
             // instead, with nothing committed.
             val corrupted = manifest.files.firstOrNull { file ->
-                resolveInside(stagingDir, file.path).length() != file.sizeBytes
+                fileSystem.sizeOf(resolveInside(stagingDir, file.path)) != file.sizeBytes
             }
             if (corrupted != null) {
                 return@withContext Result.failure(
@@ -451,10 +450,8 @@ class RepoDownloader(
                 )
             }
 
-            target.parentFile?.mkdirs()
-            if (!stagingDir.renameTo(target)) {
-                return@withContext Result.failure(IOException("cannot commit $target"))
-            }
+            target.parent?.let { fileSystem.createDirectories(it) }
+            fileSystem.atomicMove(stagingDir, target)
 
             onProgress(RepoProgress.Complete(repoId, target))
             Result.success(target)
@@ -464,7 +461,7 @@ class RepoDownloader(
             throw e
         } catch (e: Exception) {
             // Widened from IOException so a throw out of repo.manifest() (moved inside this try
-            // above) is caught here instead of escaping this method's own Result<File> contract.
+            // above) is caught here instead of escaping this method's own Result<Path> contract.
             // Strictly wider than before, not a behaviour change for the rest of this try: every other
             // line above this catch already only ever throws IOException in practice, so this only
             // changes what happens for a throw that was never anticipated in the first place —
@@ -496,16 +493,16 @@ class RepoDownloader(
      *
      * **Not safe to call concurrently with [download] for the same [repoId] and [into] — but no longer
      * unsafe in the way that used to matter most.** `download` recreates whatever directories it needs
-     * as it goes (`destination.parentFile?.mkdirs()`) and verifies only the one file it is currently
-     * fetching — never a file a previous iteration of the same attempt already verified and moved
-     * past. An `abandonStaging` landing mid-loop deletes exactly those already-verified files out from
-     * under it, and the loop has no way to notice or re-fetch them. What that used to cost: every
-     * later file still verified fine on its own, `download`'s own commit found everything *it* checked
-     * present and correct, and `stagingDir.renameTo` still succeeded — `Result.success`, publishing a
-     * repo silently missing every file downloaded before `abandonStaging` landed. `download`'s own
-     * final pre-commit check, immediately before that rename, now re-confirms every manifest file is
-     * still present at its declared size right before the rename — exactly what a mid-loop
-     * `abandonStaging` breaks — so this race now ends in a clean `Result.failure` with
+     * as it goes (`fileSystem.createDirectories(destination.parent!!)`) and verifies only the one file
+     * it is currently fetching — never a file a previous iteration of the same attempt already verified
+     * and moved past. An `abandonStaging` landing mid-loop deletes exactly those already-verified files
+     * out from under it, and the loop has no way to notice or re-fetch them. What that used to cost:
+     * every later file still verified fine on its own, `download`'s own commit found everything *it*
+     * checked present and correct, and `fileSystem.atomicMove(stagingDir, target)` still succeeded —
+     * `Result.success`, publishing a repo silently missing every file downloaded before `abandonStaging`
+     * landed. `download`'s own final pre-commit check, immediately before that rename, now re-confirms
+     * every manifest file is still present at its declared size right before the rename — exactly what a
+     * mid-loop `abandonStaging` breaks — so this race now ends in a clean `Result.failure` with
      * nothing committed, never a silent partial model. Still not something to rely on instead of
      * serialising: the loser's network transfer and disk writes are wasted rather than avoided, and
      * this says nothing about two concurrent `download` calls corrupting each other's writes to a
@@ -532,12 +529,12 @@ class RepoDownloader(
      * No staging present for [repoId] is success, not failure: the caller asked for a state — this
      * repo's staging reclaimed — and that state already holds.
      */
-    suspend fun abandonStaging(repoId: String, into: File): Result<Unit> = withContext(dispatcher) {
+    suspend fun abandonStaging(repoId: String, into: Path): Result<Unit> = withContext(dispatcher) {
         try {
-            val stagingRoot = File(into, ".staging")
+            val stagingRoot = into / ".staging"
             val stagingDir = stagingDirFor(stagingRoot, repoId)
-            if (stagingDir.exists() && !stagingDir.deleteRecursively()) {
-                return@withContext Result.failure(IOException("cannot delete staging for $repoId"))
+            if (fileSystem.exists(stagingDir)) {
+                fileSystem.deleteRecursively(stagingDir)
             }
             Result.success(Unit)
         } catch (e: IOException) {
@@ -560,10 +557,10 @@ class RepoDownloader(
      * what this number said.
      *
      * "Cheap" is an argument against hashing, not against blocking a caller's thread: an unbounded
-     * [File.walkTopDown] over however many files a repo has staged is still blocking file I/O, and
-     * this was the one non-suspend public method on this class, running that walk directly on
-     * whatever thread called it. It now `suspend`s and runs on [dispatcher], the same one [download]
-     * and [abandonStaging] already use, rather than asking every caller to know to move it off their
+     * walk over however many files a repo has staged is still blocking file I/O, and this was the
+     * one non-suspend public method on this class, running that walk directly on whatever thread
+     * called it. It now `suspend`s and runs on [dispatcher], the same one [download] and
+     * [abandonStaging] already use, rather than asking every caller to know to move it off their
      * own thread by hand — which the sample app's own `SampleViewModel` was doing with a manual
      * `withContext(Dispatchers.IO)` around this exact call, direct evidence the shape belonged here
      * instead.
@@ -600,24 +597,28 @@ class RepoDownloader(
      * without a manifest to check against; stated here rather than left for the list above to imply
      * a completeness it cannot have.
      */
-    suspend fun stagedBytes(repoId: String, into: File): Long = withContext(dispatcher) {
+    suspend fun stagedBytes(repoId: String, into: Path): Long = withContext(dispatcher) {
         try {
-            val stagingDir = stagingDirFor(File(into, ".staging"), repoId)
-            val marker = File(stagingDir, MARKER_FILE)
-            if (!stagingDir.isDirectory) {
+            val stagingDir = stagingDirFor(into / ".staging", repoId)
+            val marker = stagingDir / MARKER_FILE
+            if (fileSystem.metadataOrNull(stagingDir)?.isDirectory != true) {
                 0L
             } else {
-                stagingDir.walkTopDown()
-                    .filter { it.isFile && it != marker }
+                fileSystem.listRecursively(stagingDir)
+                    .filter { fileSystem.metadataOrNull(it)?.isRegularFile == true && it != marker }
                     .sumOf { staged ->
                         when {
                             staged.name.endsWith(".validator") -> 0L
                             staged.name.endsWith(".part") -> {
                                 val validator =
-                                    File(staged.parentFile, "${staged.name.removeSuffix(".part")}.validator")
-                                if (validator.isFile) staged.length() else 0L
+                                    staged.parent!! / "${staged.name.removeSuffix(".part")}.validator"
+                                if (fileSystem.metadataOrNull(validator)?.isRegularFile == true) {
+                                    fileSystem.sizeOf(staged)
+                                } else {
+                                    0L
+                                }
                             }
-                            else -> staged.length()
+                            else -> fileSystem.sizeOf(staged)
                         }
                     }
             }
@@ -633,18 +634,18 @@ class RepoDownloader(
      * Deliberately re-hashes rather than trusting a marker file: a marker records what was true
      * once, and the point of the check is what is true now.
      */
-    private fun RepoManifest.isSatisfiedBy(dir: File): Boolean = files.all { it.isSatisfiedIn(dir) }
+    private fun RepoManifest.isSatisfiedBy(dir: Path): Boolean = files.all { it.isSatisfiedIn(dir) }
 
     /**
      * Whether [dir] already holds this one file at the right size, with the right hash where one was
      * published.
      *
-     * `onDisk.length() == sizeBytes` is unconditional — including when `sizeBytes` is 0 — and always
-     * has been. The post-download check in `download()` above now matches it exactly, for the same
-     * reason: the two used to disagree (that check skipped entirely on a declared 0), which let a hub
-     * declaring an explicit zero pass a non-empty body on download and then fail this check on every
-     * later call forever. A declared 0 is treated as a real, checked assertion that the file is empty
-     * in both places now, not "unknown, don't check" in one and enforced in the other.
+     * `fileSystem.sizeOf(onDisk) == sizeBytes` is unconditional — including when `sizeBytes` is 0 —
+     * and always has been. The post-download check in `download()` above now matches it exactly, for
+     * the same reason: the two used to disagree (that check skipped entirely on a declared 0), which
+     * let a hub declaring an explicit zero pass a non-empty body on download and then fail this check
+     * on every later call forever. A declared 0 is treated as a real, checked assertion that the file
+     * is empty in both places now, not "unknown, don't check" in one and enforced in the other.
      *
      * One predicate behind two questions now — down from three: [isSatisfiedBy] applies it to every
      * file to decide a whole-repo cache hit against the *committed* directory, and [download] itself
@@ -656,11 +657,11 @@ class RepoDownloader(
      * need the same answer to "is this file actually done", so the predicate stays one function —
      * only the number of times it actually runs against a given file changed.
      */
-    private fun RemoteFile.isSatisfiedIn(dir: File): Boolean {
+    private fun RemoteFile.isSatisfiedIn(dir: Path): Boolean {
         val onDisk = resolveInside(dir, path)
-        return onDisk.isFile &&
-            onDisk.length() == sizeBytes &&
-            (sha256 == null || Sha256.matches(FileSystem.SYSTEM, onDisk.toOkioPath(), sha256))
+        return fileSystem.metadataOrNull(onDisk)?.isRegularFile == true &&
+            fileSystem.sizeOf(onDisk) == sizeBytes &&
+            (sha256 == null || Sha256.matches(fileSystem, onDisk, sha256))
     }
 
     /**
@@ -677,7 +678,7 @@ class RepoDownloader(
      * [download] (the transfer loop, per-file verification, [pruneOrphans]) uses the real [manifest],
      * because those need the actual declared size, not this reduced stand-in.
      */
-    private fun RepoManifest.creditingStaged(stagingDir: File, satisfiedPaths: Set<String>): RepoManifest =
+    private fun RepoManifest.creditingStaged(stagingDir: Path, satisfiedPaths: Set<String>): RepoManifest =
         copy(files = files.map { it.copy(sizeBytes = it.remainingBytes(stagingDir, satisfiedPaths)) })
 
     /**
@@ -706,13 +707,21 @@ class RepoDownloader(
      * declaration changed — must not manufacture a negative requirement that silently subsidises some
      * other file's.
      */
-    private fun RemoteFile.remainingBytes(stagingDir: File, satisfiedPaths: Set<String>): Long {
+    private fun RemoteFile.remainingBytes(stagingDir: Path, satisfiedPaths: Set<String>): Long {
         if (path in satisfiedPaths) return 0L
 
         val staged = resolveInside(stagingDir, path)
-        val part = File(staged.parentFile, "${staged.name}.part")
-        val validator = File(staged.parentFile, "${staged.name}.validator")
-        val resumableBytes = if (part.isFile && validator.isFile) part.length() else 0L
+        val parent = staged.parent!!
+        val part = parent / "${staged.name}.part"
+        val validator = parent / "${staged.name}.validator"
+        val resumableBytes = if (
+            fileSystem.metadataOrNull(part)?.isRegularFile == true &&
+            fileSystem.metadataOrNull(validator)?.isRegularFile == true
+        ) {
+            fileSystem.sizeOf(part)
+        } else {
+            0L
+        }
         return maxOf(0L, sizeBytes - resumableBytes)
     }
 
@@ -741,12 +750,14 @@ class RepoDownloader(
      * The directory pass runs second, after every orphan file is already gone, and bottom-up rather
      * than interleaved with the file pass: a directory is only safe to judge once nothing that might
      * still be inside it is left to judge first. Deleting a directory nothing names is not optional
-     * tidiness — an orphaned subdirectory that survives this rides `stagingDir.renameTo(target)`
-     * straight into the committed repo on the very same rename that publishes the real files,
-     * indistinguishable from real content to anything reading it back afterward. `File.delete()` on
-     * a directory only succeeds when it is empty, so this is a no-op for every directory that still
-     * holds something legitimate — including one a file for *this* attempt has not been written into
-     * yet, which [download]'s own loop repopulates moments later regardless.
+     * tidiness — an orphaned subdirectory that survives this rides `fileSystem.atomicMove(stagingDir,
+     * target)` straight into the committed repo on the very same rename that publishes the real files,
+     * indistinguishable from real content to anything reading it back afterward. The directory pass
+     * only ever deletes a directory it first confirms is empty via `listOrNull` — mirroring
+     * `File.delete()`'s old no-op-on-non-empty behaviour without relying on a boolean return — so this
+     * is a no-op for every directory that still holds something legitimate — including one a file for
+     * *this* attempt has not been written into yet, which [download]'s own loop repopulates moments
+     * later regardless.
      *
      * A path still named in the manifest survives here untouched, even if the bytes staged under it
      * are no longer the size or hash the manifest currently declares. That is deliberate, not an
@@ -760,25 +771,28 @@ class RepoDownloader(
      * cost of leaving it alone is a wasted transfer of bytes that turn out to be unusable — correct,
      * not free, and judged not worth a second piece of state to avoid.
      */
-    private fun pruneOrphans(stagingDir: File, manifest: RepoManifest) {
-        if (!stagingDir.isDirectory) return
+    private fun pruneOrphans(stagingDir: Path, manifest: RepoManifest) {
+        if (fileSystem.metadataOrNull(stagingDir)?.isDirectory != true) return
         val declaredPaths = manifest.files.mapTo(HashSet()) { it.path }
-        stagingDir.walkTopDown()
-            .filter { it.isFile }
+        fileSystem.listRecursively(stagingDir)
+            .filter { fileSystem.metadataOrNull(it)?.isRegularFile == true }
             .forEach { staged ->
-                val relativePath = staged.relativeTo(stagingDir).invariantSeparatorsPath
+                val relativePath = staged.relativeTo(stagingDir).toString()
                 val vouchedFor = relativePath in declaredPaths ||
                     relativePath.removeSuffix(".part") in declaredPaths ||
                     relativePath.removeSuffix(".validator") in declaredPaths
                 if (!vouchedFor) {
-                    resolveInside(stagingDir, relativePath).delete()
+                    fileSystem.delete(resolveInside(stagingDir, relativePath))
                 }
             }
-        stagingDir.walkBottomUp()
-            .filter { it.isDirectory && it != stagingDir }
+        fileSystem.listRecursively(stagingDir).toList().asReversed()
+            .filter { fileSystem.metadataOrNull(it)?.isDirectory == true }
             .forEach { directory ->
-                val relativePath = directory.relativeTo(stagingDir).invariantSeparatorsPath
-                resolveInside(stagingDir, relativePath).delete()
+                val relativePath = directory.relativeTo(stagingDir).toString()
+                val resolved = resolveInside(stagingDir, relativePath)
+                if (fileSystem.listOrNull(resolved)?.isEmpty() == true) {
+                    fileSystem.delete(resolved)
+                }
             }
     }
 
@@ -794,8 +808,8 @@ class RepoDownloader(
      * staging walked straight into "owner/model"'s live `.part` files and deleted them as orphans of
      * a manifest that was never theirs — [abandonStaging] and [stagedBytes] reached the same way, via
      * `deleteRecursively()` and a recursive sum respectively. The emptied nested directory then rode
-     * `stagingDir.renameTo(target)` straight into the committed repo, because [pruneOrphans] only
-     * ever deletes files (tracked separately; see its own doc).
+     * `fileSystem.atomicMove(stagingDir, target)` straight into the committed repo, because
+     * [pruneOrphans] only ever deletes files (tracked separately; see its own doc).
      *
      * Fixed by appending [STAGING_SUFFIX] to [repoId]'s own *last* path segment, rather than treating
      * the joined string as one more ordinary path component. "owner" alone resolves to `owner.d` — a
@@ -811,7 +825,7 @@ class RepoDownloader(
      * already accepts for a `..` that reconstructs a legitimate-looking path, and no more reachable —
      * stated here rather than left silent, not treated as a gap worth closing beyond that.
      */
-    private fun stagingDirFor(stagingRoot: File, repoId: String): File {
+    private fun stagingDirFor(stagingRoot: Path, repoId: String): Path {
         // Validates repoId exactly as an unsuffixed resolve always did — rejects "", "..", and any
         // escape — before this function's own suffixing gets a chance to be more permissive:
         // resolving "" + STAGING_SUFFIX lands on a proper descendant of stagingRoot, not stagingRoot
@@ -820,45 +834,52 @@ class RepoDownloader(
         // trimEnd('/'): a trailing separator must not turn the suffix into a new segment of its own
         // ("owner/" -> "owner/.d", three segments) instead of extending the last real one
         // ("owner.d", two) — repoId with or without a trailing slash names the same target directory
-        // (File(into, "owner/").canonicalPath == File(into, "owner").canonicalPath), and must name
-        // the same staging directory too.
+        // ((stagingRoot / "owner/").normalized() == (stagingRoot / "owner").normalized()), and must
+        // name the same staging directory too.
         return resolveInside(stagingRoot, "${repoId.trimEnd('/')}$STAGING_SUFFIX")
     }
 
     /**
-     * Whether canonical path [targetPath] is, or falls strictly inside, [reservedRoot].
+     * Whether normalized path [targetPath] is, or falls strictly inside, [reservedRoot].
      *
      * Separate from [resolveInside]: that function only rejects a path that escapes its parent, and
      * both `.staging` and `.ferry` are ordinary strict children of `into`, not escapes — this is the
      * narrower check that a repoId did not resolve onto one of the handful of names `into` itself
      * reserves for Ferry's own bookkeeping.
      */
-    private fun collidesWith(targetPath: String, reservedRoot: File): Boolean {
-        val reservedPath = reservedRoot.canonicalPath
-        return targetPath == reservedPath || targetPath.startsWith(reservedPath + File.separator)
+    private fun collidesWith(targetPath: Path, reservedRoot: Path): Boolean {
+        val target = targetPath.normalized().toString()
+        val reserved = reservedRoot.normalized().toString()
+        return target == reserved || target.startsWith("$reserved/")
     }
 
     /**
      * Resolves [relative] inside [parent] and fails if it escapes.
      *
      * Repo ids come from the calling app and file paths come from the hub's manifest over the
-     * network, so neither can be trusted to stay inside the directory it is joined to. Canonical
-     * paths are compared rather than the raw strings so that "..", symlinks, and redundant
-     * separators are all resolved before the comparison rather than pattern-matched.
+     * network, so neither can be trusted to stay inside the directory it is joined to.
+     *
+     * Normalized lexically rather than canonicalized: okio can only canonicalize a path that already
+     * exists, and most of what this method guards does not exist yet. ".." and redundant separators
+     * are resolved by normalization; a symlink inside [parent] pointing outside it is no longer
+     * resolved before the comparison — recorded in docs/known-limitations.md, acceptable because
+     * every tree this method guards lives under an app-private directory Ferry itself created.
      *
      * Strictly inside: resolving to [parent] itself is rejected, not tolerated as a base case.
-     * File(parent, "") and File(parent, ".") are both exactly parent, so permitting equality made
-     * an empty repo id — a blank search field, a null coalesced to "" — resolve `target` onto the
-     * download root, whose commit step then deleteRecursively()s every repo the user had. None of
-     * this method's callers wants the parent: a repo never stages as the whole staging area, a
-     * target is never the download root, a repo's own shadow directory never sits directly at the
-     * marker root, and a file is never the directory containing it.
+     * `parent / ""` and `parent / "."` both normalize to exactly [parent], so permitting equality
+     * made an empty repo id — a blank search field, a null coalesced to "" — resolve `target` onto
+     * the download root, whose commit step then deletes every repo the user had. None of this
+     * method's callers wants the parent: a repo never stages as the whole staging area, a target is
+     * never the download root, a repo's own shadow directory never sits directly at the marker root,
+     * and a file is never the directory containing it.
      */
-    private fun resolveInside(parent: File, relative: String): File {
-        val candidate = File(parent, relative)
-        val root = parent.canonicalPath
-        val resolved = candidate.canonicalPath
-        if (resolved == root || !resolved.startsWith(root + File.separator)) {
+    private fun resolveInside(parent: Path, relative: String): Path {
+        val candidate = parent / relative
+        val root = parent.normalized()
+        val resolved = candidate.normalized()
+        if (relative.startsWith("/") || resolved == root ||
+            !resolved.toString().startsWith("$root/")
+        ) {
             throw IOException("path must resolve strictly inside $parent: $relative")
         }
         return candidate
