@@ -10,6 +10,7 @@ import io.ktor.http.appendPathSegments
 import io.ktor.http.isSuccess
 import io.ktor.http.parseUrl
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable

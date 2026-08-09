@@ -57,7 +57,7 @@ class ModelScopeTest {
     fun tearDown() = Unit
 
     @Test
-    fun `manifest lists blobs and skips trees, preserving nested paths`() = runTest {
+    fun `manifest lists blobs and skips trees - preserving nested paths`() = runTest {
         queue.enqueue(listingJson)
 
         val manifest = repo.manifest("owner/model").getOrThrow()
@@ -69,7 +69,7 @@ class ModelScopeTest {
     }
 
     @Test
-    fun `sha256 is mapped from every blob, not only lfs ones`() = runTest {
+    fun `sha256 is mapped from every blob - not only lfs ones`() = runTest {
         queue.enqueue(listingJson)
 
         val manifest = repo.manifest("owner/model").getOrThrow()
@@ -117,7 +117,7 @@ class ModelScopeTest {
      * segments, and `HuggingFaceTest` pins the equivalent for the same reason.
      */
     @Test
-    fun `a single-segment repo id produces one path segment, not a split or dropped id`() = runTest {
+    fun `a single-segment repo id produces one path segment - not a split or dropped id`() = runTest {
         queue.enqueue(listingJson)
 
         repo.manifest("bert-base-uncased")
@@ -324,7 +324,7 @@ class ModelScopeTest {
     }
 
     @Test
-    fun `malformed json is returned as a failure, not thrown`() = runTest {
+    fun `malformed json is returned as a failure - not thrown`() = runTest {
         queue.enqueue("not json at all")
 
         val result = repo.manifest("any/repo")
@@ -341,7 +341,7 @@ class ModelScopeTest {
     }
 
     @Test
-    fun `an invalid baseUrl is returned as a failure, not thrown`() = runTest {
+    fun `an invalid baseUrl is returned as a failure - not thrown`() = runTest {
         val invalidRepo = ModelScope(queue.client, baseUrl = "modelscope.cn")
 
         val result = invalidRepo.manifest("any/repo")

@@ -120,7 +120,7 @@ class ResumableDownloaderTest {
      * writes the tail at offset zero, and fails the length check forever.
      */
     @Test
-    fun `a 200 carrying a matching Content-Range is a continuation, not a restart`() {
+    fun `a 200 carrying a matching Content-Range is a continuation - not a restart`() {
         writeText(partFile(), fullBody.take(8))
         writeText(validatorFile(), "\"v1\"")
         queue.enqueue(
@@ -218,7 +218,7 @@ class ResumableDownloaderTest {
      * out of RemoteFile.url reaching here.
      */
     @Test
-    fun `a malformed url is returned as a failure, not thrown`() {
+    fun `a malformed url is returned as a failure - not thrown`() {
         var result: Result<Path>? = null
         runTest { result = downloader.download("not a url", target()) }
 
@@ -236,7 +236,7 @@ class ResumableDownloaderTest {
     }
 
     @Test
-    fun `progress reports totals from Content-Range, not the slice length`() {
+    fun `progress reports totals from Content-Range - not the slice length`() {
         writeText(partFile(), fullBody.take(8))
         writeText(validatorFile(), "\"v1\"")
         queue.enqueue(

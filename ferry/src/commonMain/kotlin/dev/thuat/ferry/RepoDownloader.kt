@@ -3,6 +3,7 @@ package dev.thuat.ferry
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO
 import kotlinx.coroutines.withContext
 import okio.FileSystem
 import okio.IOException

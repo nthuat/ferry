@@ -60,7 +60,7 @@ class FerryTest {
     }
 
     @Test
-    fun `a missing repo is a failure, not an exception`() = runTest {
+    fun `a missing repo is a failure - not an exception`() = runTest {
         queue.enqueue(status = HttpStatusCode.NotFound)
 
         val result = huggingFace().download("nope/nope", root)

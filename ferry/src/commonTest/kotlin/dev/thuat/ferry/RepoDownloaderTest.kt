@@ -428,7 +428,7 @@ class RepoDownloaderTest {
     }
 
     @Test
-    fun `progress reports space check, every file, verification and completion`() {
+    fun `progress reports space check - every file - verification and completion`() {
         val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
         queue.enqueue(body = weightsBody)
 
@@ -832,7 +832,7 @@ class RepoDownloaderTest {
      * ownership marker, so the commit step must refuse it rather than delete it to make room.
      */
     @Test
-    fun `a directory at the target path that ferry did not write is refused, not deleted`() {
+    fun `a directory at the target path that ferry did not write is refused - not deleted`() {
         val files = listOf(remote("model.bin", weightsBody.length.toLong()))
         queue.enqueue(body = weightsBody)
         val theirs = root / "a/b/notes.txt"
@@ -1257,7 +1257,7 @@ class RepoDownloaderTest {
      * "gone/" and this asserts that directory does not survive into the commit either.
      */
     @Test
-    fun `pruneOrphans removes a directory it empties, not only the files inside it`() {
+    fun `pruneOrphans removes a directory it empties - not only the files inside it`() {
         writeText(
             root / ".staging/a/b.d/gone/gone.bin.part",
             "stale bytes under a subdirectory the manifest no longer names",
@@ -1448,7 +1448,7 @@ class RepoDownloaderTest {
     }
 
     @Test
-    fun `stagedBytes sums every staged file's reusable bytes together, touching no network`() {
+    fun `stagedBytes sums every staged file's reusable bytes together - touching no network`() {
         writeText(root / ".staging/a/b.d/config.json", configBody) // bare, complete-looking: counted in full
         writeText(root / ".staging/a/b.d/model.bin.part", "12345678") // 8 resumable bytes, credited
         writeText(root / ".staging/a/b.d/model.bin.validator", "\"v1\"")

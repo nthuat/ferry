@@ -172,7 +172,7 @@ class OllamaTest {
      * exact fixture before committing.
      */
     @Test
-    fun `two layers of the same mediaType produce distinct paths, not a collision`() = runTest {
+    fun `two layers of the same mediaType produce distinct paths - not a collision`() = runTest {
         queue.enqueue(visionCollisionJson)
 
         val manifest = repo.manifest("llama3.2-vision:11b").getOrThrow()
@@ -211,7 +211,7 @@ class OllamaTest {
      * before restoring it.
      */
     @Test
-    fun `two layers with identical mediaType and digest dedupe to one file, not double counted`() = runTest {
+    fun `two layers with identical mediaType and digest dedupe to one file - not double counted`() = runTest {
         queue.enqueue(exactDuplicateLayerJson)
 
         val manifest = repo.manifest("dup:latest").getOrThrow()
@@ -262,7 +262,7 @@ class OllamaTest {
      * sent, not what this client decodes them back into afterwards.
      */
     @Test
-    fun `a tag with embedded traversal segments is sent as one percent-encoded segment, not literal dot segments`() =
+    fun `a tag with embedded traversal segments is sent as one percent-encoded segment - not literal dot segments`() =
         runTest {
             queue.enqueue(basicManifestJson)
 
@@ -296,7 +296,7 @@ class OllamaTest {
      * introduced by this change.
      */
     @Test
-    fun `an exact two-dot tag pops the manifests segment, same as OkHttp's addPathSegment did`() = runTest {
+    fun `an exact two-dot tag pops the manifests segment - same as OkHttp's addPathSegment did`() = runTest {
         queue.enqueue(basicManifestJson)
 
         val result = repo.manifest("model:..")
@@ -411,7 +411,7 @@ class OllamaTest {
     }
 
     @Test
-    fun `malformed json is returned as a failure, not thrown`() = runTest {
+    fun `malformed json is returned as a failure - not thrown`() = runTest {
         queue.enqueue("not json at all")
 
         val result = repo.manifest("any:latest")
@@ -464,7 +464,7 @@ class OllamaTest {
     }
 
     @Test
-    fun `an invalid baseUrl is returned as a failure, not thrown`() = runTest {
+    fun `an invalid baseUrl is returned as a failure - not thrown`() = runTest {
         val invalidRepo = Ollama(queue.client, baseUrl = "registry.ollama.ai")
 
         val result = invalidRepo.manifest("any:latest")

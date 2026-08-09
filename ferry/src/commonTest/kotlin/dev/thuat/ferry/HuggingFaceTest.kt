@@ -58,7 +58,7 @@ class HuggingFaceTest {
     }
 
     @Test
-    fun `sha256 comes from lfs oid, not the top level git oid`() = runTest {
+    fun `sha256 comes from lfs oid - not the top level git oid`() = runTest {
         queue.enqueue(treeJson)
 
         val manifest = repo.manifest("Qwen/Qwen2.5-0.5B-Instruct").getOrThrow()
@@ -106,7 +106,7 @@ class HuggingFaceTest {
     }
 
     @Test
-    fun `malformed json is returned as a failure, not thrown`() = runTest {
+    fun `malformed json is returned as a failure - not thrown`() = runTest {
         queue.enqueue("not json at all")
 
         val result = repo.manifest("any/repo")
@@ -137,7 +137,7 @@ class HuggingFaceTest {
      * for these, not drop the id or split on some other character, since there is no `/` to split on.
      */
     @Test
-    fun `a single-segment canonical repo id produces one path segment, not a split or dropped id`() = runTest {
+    fun `a single-segment canonical repo id produces one path segment - not a split or dropped id`() = runTest {
         queue.enqueue(treeJson)
 
         repo.manifest("gpt2")
@@ -560,7 +560,7 @@ class HuggingFaceTest {
     }
 
     @Test
-    fun `an invalid baseUrl is returned as a failure, not thrown`() = runTest {
+    fun `an invalid baseUrl is returned as a failure - not thrown`() = runTest {
         val invalidRepo = HuggingFace(queue.client, baseUrl = "huggingface.co")
 
         val result = invalidRepo.manifest("any/repo")
