@@ -2,6 +2,7 @@ package dev.thuat.ferry
 
 import io.ktor.http.URLBuilder
 import io.ktor.http.appendPathSegments
+import io.ktor.http.encodeURLPathPart
 
 /**
  * Appends [raw]'s slash-separated pieces as path segments, resolving `.` and `..` the way OkHttp's
@@ -32,5 +33,41 @@ internal fun URLBuilder.appendPathSegmentsResolvingDots(raw: String): URLBuilder
             }
             else -> appendPathSegments(piece)
         }
+    }
+}
+
+/**
+ * Appends [segment] as exactly one path segment, mirroring OkHttp's `HttpUrl.Builder.addPathSegment`
+ * (singular) — not [appendPathSegmentsResolvingDots], which mirrors the *plural* `addPathSegments`
+ * and is the wrong replacement here: OkHttp drew a real behavioural line between the two that this
+ * has to preserve for call sites (Ollama's OCI tag) that only ever held one path component and never
+ * meant `/` inside it to be a delimiter.
+ *
+ * Verified against OkHttp 4.12.0's own source (`HttpUrl.Builder.push`, `PATH_SEGMENT_ENCODE_SET`):
+ * `addPathSegment(pathSegment)` runs the *entire* string through one `canonicalize` call — the same
+ * segment encode set used per-piece by the plural form, `" \"<>^`{}|/\\?#"` — so any `/` inside it is
+ * percent-encoded to `%2F` as part of one opaque segment, never treated as a delimiter. Only when the
+ * *whole* canonicalized string is exactly `.` or `..` does OkHttp's shared `push()` treat it
+ * specially — skip, or pop one segment — the identical dot-handling plural `addPathSegments` gets per
+ * split piece, just evaluated once, over the whole un-split string, here. A tag of
+ * `"../../../../secret-endpoint"` therefore becomes one segment,
+ * `..%2F..%2F..%2F..%2Fsecret-endpoint` — the literal `..`s never reach a `/`-delimited position, so
+ * no RFC-3986-normalizing proxy downstream can resolve them into a traversal. A tag of exactly `".."`
+ * still pops one segment, exactly once — OkHttp's `push()` doesn't distinguish which call site fed it
+ * that string.
+ *
+ * [encodeURLPathPart] is Ktor's own per-segment percent-encoder and encodes the identical character
+ * set OkHttp's `PATH_SEGMENT_ENCODE_SET` does (confirmed empirically against the literal set above,
+ * including that `&` and `+` are left literal) — it is what [appendPathSegments] already uses per
+ * split piece; this calls it directly, once, over the whole unsplit [segment], which is the one thing
+ * [appendPathSegments] cannot do (it re-splits on `/` even for a single vararg argument).
+ */
+internal fun URLBuilder.appendOpaqueSegment(segment: String): URLBuilder = apply {
+    when (segment) {
+        "." -> Unit
+        ".." -> if (encodedPathSegments.isNotEmpty()) {
+            encodedPathSegments = encodedPathSegments.dropLast(1)
+        }
+        else -> encodedPathSegments = encodedPathSegments + segment.encodeURLPathPart()
     }
 }

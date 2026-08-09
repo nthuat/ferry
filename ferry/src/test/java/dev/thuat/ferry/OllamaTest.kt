@@ -250,6 +250,61 @@ class OllamaTest {
         assertEquals("/v2/library/qwen2.5/manifests/0.5b", queue.requests[0].url.encodedPath)
     }
 
+    /**
+     * The OCI tag (everything after the last `:` in repoId) is appended as one opaque path segment,
+     * mirroring OkHttp's `addPathSegment` (singular) — not the `..`-popping treatment `qualifiedName`
+     * gets, which mirrors the *plural* `addPathSegments`. Verified against OkHttp 4.12.0's own source
+     * (`appendOpaqueSegment`'s KDoc): a raw `/` inside a singular path segment is percent-encoded to
+     * `%2F`, never treated as a delimiter, so a hostile tag can never contribute a literal `/../`
+     * sequence to the wire — a standard proxy doing RFC-3986 dot-segment removal never sees `..` at a
+     * `/`-delimited position to resolve. Pinned on the *wire* form (`encodedPath`), not the decoded
+     * `segments`, since the escape this guards is what a downstream proxy does with the literal bytes
+     * sent, not what this client decodes them back into afterwards.
+     */
+    @Test
+    fun `a tag with embedded traversal segments is sent as one percent-encoded segment, not literal dot segments`() =
+        runTest {
+            queue.enqueue(basicManifestJson)
+
+            repo.manifest("model:../../../../secret-endpoint")
+
+            val encodedPath = queue.requests[0].url.encodedPath
+            assertEquals(
+                "/v2/library/model/manifests/..%2F..%2F..%2F..%2Fsecret-endpoint",
+                encodedPath,
+                "the tag's own '/' must be percent-encoded into one opaque segment, matching OkHttp's " +
+                    "addPathSegment (singular) — never split into literal '..' path segments",
+            )
+            // What RFC 3986 §5.2.4 dot-segment removal actually looks for: a '/'-delimited component
+            // that is *exactly* ".." or ".". The opaque segment above starts with ".." but is not
+            // equal to it once its own %2F-encoded slashes are counted as part of the same component,
+            // so no standards-compliant proxy walking this path by its literal '/' boundaries has
+            // anything to resolve.
+            assertTrue(
+                encodedPath.split('/').none { it == ".." || it == "." },
+                "no '/'-delimited component of the wire path may be a literal dot-segment",
+            )
+        }
+
+    /**
+     * The one case OkHttp's `addPathSegment` (singular) treats specially: a tag that is *exactly*
+     * `".."`, with nothing else, still pops the one segment before it (`manifests`) — `push()` is
+     * shared with the plural form and doesn't distinguish which call site fed it that exact string.
+     * This is the pre-existing "residual" the adapter's own KDoc already documents: still within the
+     * `v2` namespace (`requireWithinNamespace` does not trip), just a malformed, same-namespace
+     * request rather than a retargeted one. Replicated here for fidelity with the old behaviour, not
+     * introduced by this change.
+     */
+    @Test
+    fun `an exact two-dot tag pops the manifests segment, same as OkHttp's addPathSegment did`() = runTest {
+        queue.enqueue(basicManifestJson)
+
+        val result = repo.manifest("model:..")
+
+        assertTrue(result.isSuccess, "still within the v2 namespace - a malformed request, not a refused one")
+        assertEquals("/v2/library/model", queue.requests[0].url.encodedPath)
+    }
+
     /** "a bare name with no tag, which conventionally means latest" - stated in Ollama's own KDoc. */
     @Test
     fun `a bare repo id with no tag defaults to latest`() = runTest {

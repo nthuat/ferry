@@ -528,7 +528,7 @@ class HuggingFaceTest {
     fun `a next page url on another port is refused and never requested`() = runTest {
         queue.enqueue(
             body = treeJson,
-            headers = headersOf(HttpHeaders.Link, "<http://hub.test:9999/page2>; rel=\"next\">"),
+            headers = headersOf(HttpHeaders.Link, "<http://hub.test:9999/page2>; rel=\"next\""),
         )
         queue.enqueue(treeJson)
 

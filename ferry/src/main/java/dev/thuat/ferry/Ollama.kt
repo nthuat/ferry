@@ -59,15 +59,25 @@ class Ollama(
             // request's query, and a ".." inside qualifiedName can't escape the "v2" namespace
             // either, because requireWithinNamespace below asserts the built URL still starts under
             // "v2" - the one segment every OCI distribution request lives under - before the request
-            // is issued. A ".." positioned later - as tag itself, e.g. - can still pop "manifests"
-            // without ever popping below "v2", landing a same-origin, same-namespace request that is
-            // simply malformed rather than retargeted. That residual is accepted project-wide, not
+            // is issued.
+            //
+            // tag is different: it travels through appendOpaqueSegment, not
+            // appendPathSegmentsResolvingDots, mirroring OkHttp's addPathSegment (singular) rather
+            // than addPathSegments (plural) - see that function's own KDoc for the OkHttp source this
+            // was checked against. A tag is one path component, never several: OkHttp's old
+            // `.addPathSegment(tag)` percent-encoded any `/` inside it into one opaque segment, so a
+            // tag could never contribute a literal, `/`-delimited ".." for a downstream proxy to
+            // resolve - only a tag that is *exactly* ".." (nothing else) still pops the segment before
+            // it, "manifests", the one case OkHttp's own push() treats specially regardless of which
+            // call site fed it that string. That residual - still within "v2", just a malformed,
+            // same-namespace request rather than a retargeted one - is accepted project-wide, not
             // specific to this adapter (docs/known-limitations.md's "Residual" paragraph on this same
             // mechanism).
             val namespace = registryNamespace(base)
             val manifestUrl = URLBuilder(namespace)
                 .appendPathSegmentsResolvingDots(qualifiedName)
-                .appendPathSegments("manifests", tag)
+                .appendPathSegments("manifests")
+                .appendOpaqueSegment(tag)
                 .build()
                 .also { requireWithinNamespace(it, namespace.segments, "repoId '$repoId'") }
 
