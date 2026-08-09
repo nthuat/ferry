@@ -1,8 +1,5 @@
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-
 plugins {
-    id("java-library")
-    id("org.jetbrains.kotlin.jvm")
+    id("org.jetbrains.kotlin.multiplatform")
     id("org.jetbrains.kotlin.plugin.serialization")
     id("maven-publish")
     id("signing")
@@ -11,66 +8,47 @@ plugins {
 // 0.x, deliberately: RepoProgress is sealed and pause is future work (README's "0.x" note) — a
 // Paused case would be source-breaking for every exhaustive `when` once this hits 1.0.0. Free at 0.x.
 group = "dev.thuat"
-version = "0.1.0"
-
-java {
-    sourceCompatibility = JavaVersion.VERSION_17
-    targetCompatibility = JavaVersion.VERSION_17
-    // Maven Central rejects a publication missing either jar. withJavadocJar() packages whatever the
-    // standard `javadoc` task produces — empty for a Kotlin-only source set, which is a real gap
-    // (no KDoc-generated API docs) but a separate, larger addition (a Dokka dependency) than this
-    // task's scope; the jar existing is what Central actually requires to accept the publication.
-    withSourcesJar()
-    withJavadocJar()
-}
+version = "0.2.0"
 
 kotlin {
+    jvmToolchain(17)
     compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_17)
         // A library has no excuse for warnings its consumers will inherit.
         allWarningsAsErrors.set(true)
     }
-    // java-library defaults Kotlin sources to src/{main,test}/kotlin. This module's history
-    // (git log --follow, eight defect fixes) lives under src/{main,test}/java — add it as a
-    // source dir rather than moving 18 files and severing that history.
+
+    jvm()
+    iosArm64()
+    iosSimulatorArm64()
+    iosX64()
+
     sourceSets {
-        main {
-            kotlin.srcDir("src/main/java")
+        commonMain.dependencies {
+            // api: Path, HttpClient and CoroutineDispatcher are in public signatures —
+            // same embeddability argument the OkHttp dependency carried before.
+            api("com.squareup.okio:okio:3.9.1")
+            api("io.ktor:ktor-client-core:3.2.3")
+            api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+            // Stays implementation: serialization appears in no public signature, only inside HuggingFace.
+            implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
         }
-        test {
-            kotlin.srcDir("src/test/java")
+        commonTest.dependencies {
+            implementation(kotlin("test"))
+            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+            implementation("io.ktor:ktor-client-mock:3.2.3")
+            implementation("com.squareup.okio:okio-fakefilesystem:3.9.1")
+        }
+        jvmMain.dependencies {
+            // JVM engine.
+            api("io.ktor:ktor-client-okhttp:3.2.3")
+        }
+        jvmTest.dependencies {
+            implementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+        }
+        appleMain.dependencies {
+            api("io.ktor:ktor-client-darwin:3.2.3")
         }
     }
-}
-
-dependencies {
-    // api, not implementation: OkHttpClient is in the signature of Ferry.huggingFace, HuggingFace
-    // and ResumableDownloader, and CoroutineDispatcher in three constructors. On implementation
-    // those types are absent from a consumer's compile classpath, so the host could not pass its own
-    // client — which is the property EmbeddabilityTest exists to guarantee, and which that test
-    // cannot observe because it compiles inside this module.
-    api("com.squareup.okhttp3:okhttp:4.12.0")
-    // -core, not -android: this module is plain JVM and uses only Dispatchers.IO — the -android
-    // artifact adds nothing but the Android Main dispatcher, which nothing here touches, and on an
-    // api configuration every consumer inherits it, including a JVM one that can never load it.
-    // An Android consumer that wants Dispatchers.Main already has it: androidx.work:work-runtime-ktx,
-    // which :ferry-work depends on, brings kotlinx-coroutines-android itself.
-    api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
-    // Stays implementation: serialization appears in no public signature, only inside HuggingFace.
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
-    // api, not implementation: okio.Path enters public signatures in Task 2.
-    api("com.squareup.okio:okio:3.9.1")
-    // api, not implementation: HttpClient enters ResumableDownloader's public constructor here.
-    api("io.ktor:ktor-client-core:3.2.3")
-    // JVM engine; moves to jvmMain in Task 7.
-    api("io.ktor:ktor-client-okhttp:3.2.3")
-
-    testImplementation("junit:junit:4.13.2")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
-    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
-    testImplementation(kotlin("test"))
-    testImplementation("com.squareup.okio:okio-fakefilesystem:3.9.1")
-    testImplementation("io.ktor:ktor-client-mock:3.2.3")
 }
 
 /**
@@ -87,22 +65,14 @@ val architectureDictatingDependencies = listOf(
 )
 
 /**
- * OkHttpClient and CoroutineDispatcher must stay on the api configuration: they are in the
+ * HttpClient and okio's own types must stay on the commonMainApi configuration: they are in the
  * signatures of Ferry.huggingFace, HuggingFace and ResumableDownloader, and on implementation a
- * consumer could not pass its own client or dispatcher at all — the whole point of taking them as
+ * consumer could not pass its own client or filesystem at all — the whole point of taking them as
  * constructor parameters. See EmbeddabilityTest.
  */
-val okhttpApiDependency = "com.squareup.okhttp3:okhttp"
-
-/**
- * CoroutineDispatcher itself lives in kotlinx-coroutines-core, which is what this module declares.
- * -android is the same types plus a Main dispatcher this module never uses; a host is free to add it
- * on its own side, and an earlier version of this file declared it here, so either satisfies this
- * check rather than false-failing on an artifact choice that was never the requirement.
- */
-val coroutineDispatcherApiDependencies = listOf(
-    "org.jetbrains.kotlinx:kotlinx-coroutines-android",
-    "org.jetbrains.kotlinx:kotlinx-coroutines-core",
+val commonMainApiDependencies = listOf(
+    "io.ktor:ktor-client-core",
+    "com.squareup.okio:okio",
 )
 
 tasks.register("checkEmbeddable") {
@@ -111,8 +81,8 @@ tasks.register("checkEmbeddable") {
     doLast {
         val offenders = configurations
             // Android's variant configs are "debugRuntimeClasspath" / "releaseRuntimeClasspath"
-            // (capital R); java-library's plain, unvaried one is "runtimeClasspath" (lowercase r) —
-            // ignoreCase so the java-library conversion doesn't quietly empty this filter.
+            // (capital R); the KMP jvm target's is "jvmRuntimeClasspath" — ignoreCase so neither
+            // naming convention quietly empties this filter.
             .filter { it.isCanBeResolved && it.name.endsWith("RuntimeClasspath", ignoreCase = true) }
             .flatMap { configuration ->
                 configuration.incoming.resolutionResult.allDependencies
@@ -123,18 +93,14 @@ tasks.register("checkEmbeddable") {
             .distinct()
 
         // EmbeddabilityTest cannot catch a regression that moves these back to implementation: it
-        // compiles against this module's source, where both configurations put OkHttpClient and
-        // CoroutineDispatcher on the compile classpath the same way, so it would pass either way.
-        // Proving it for real needs a consumer project built against the published artifact, and
-        // nothing is published yet — this checks the one thing that is cheap to check from inside
-        // the module: that the declared configuration is still api, not just that the types resolve.
-        val apiDependencyIds = configurations.getByName("api").allDependencies
+        // compiles against this module's source, where both configurations put HttpClient and okio's
+        // types on the compile classpath the same way, so it would pass either way. Proving it for
+        // real needs a consumer project built against the published artifact, and nothing is
+        // published yet — this checks the one thing that is cheap to check from inside the module:
+        // that the declared configuration is still api, not just that the types resolve.
+        val apiDependencyIds = configurations.getByName("commonMainApi").allDependencies
             .map { "${it.group}:${it.name}" }
-        val missingFromApi = listOfNotNull(
-            okhttpApiDependency.takeIf { it !in apiDependencyIds },
-            coroutineDispatcherApiDependencies.joinToString(" or ")
-                .takeIf { coroutineDispatcherApiDependencies.none { dep -> dep in apiDependencyIds } },
-        )
+        val missingFromApi = commonMainApiDependencies.filter { it !in apiDependencyIds }
 
         // Both checks are computed above before either can fail here, so an architecture-dictating
         // dependency and an api regression are both reported together — neither's require() aborts
@@ -144,7 +110,7 @@ tasks.register("checkEmbeddable") {
             "Ferry must not depend on these — they dictate the host's architecture: $offenders"
                 .takeIf { offenders.isNotEmpty() },
             ("These must be declared with api(...), not implementation(...): $missingFromApi — " +
-                "OkHttpClient and CoroutineDispatcher are in Ferry's public constructors, and a " +
+                "HttpClient and okio's Path/FileSystem are in Ferry's public constructors, and a " +
                 "consumer can only supply its own if these types are on its compile classpath too.")
                 .takeIf { missingFromApi.isNotEmpty() },
         )
@@ -155,21 +121,24 @@ tasks.register("checkEmbeddable") {
 
 tasks.named("check") { dependsOn("checkEmbeddable") }
 
-// Credentials, signing and the POM fields shared with :ferry-work live in gradle/publishing.gradle.kts.
-apply(from = "$rootDir/gradle/publishing.gradle.kts")
-
+// Publishing: KMP creates one publication per target automatically. Central still wants a
+// javadoc jar on each:
+val javadocJar = tasks.register<org.gradle.jvm.tasks.Jar>("javadocJar") {
+    archiveClassifier.set("javadoc")
+}
 publishing {
-    publications {
-        create<MavenPublication>("release") {
-            from(components["java"])
-            pom {
-                name.set("ferry")
-                description.set(
-                    "Resumable, verified downloads of AI model repositories from HuggingFace, " +
-                        "ModelScope or Ollama — never a partial or corrupt model, never starts a " +
-                        "download the device can't finish.",
-                )
-            }
+    publications.withType<MavenPublication>().configureEach {
+        artifact(javadocJar)
+        pom {
+            name.set("ferry")
+            description.set(
+                "Resumable, verified downloads of AI model repositories from HuggingFace, " +
+                    "ModelScope or Ollama — never a partial or corrupt model, never starts a " +
+                    "download the device can't finish.",
+            )
         }
     }
 }
+
+// Credentials, signing and the POM fields shared with :ferry-work live in gradle/publishing.gradle.kts.
+apply(from = "$rootDir/gradle/publishing.gradle.kts")

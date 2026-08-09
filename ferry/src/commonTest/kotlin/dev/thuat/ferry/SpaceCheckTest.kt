@@ -7,7 +7,6 @@ import kotlin.test.assertTrue
 import okio.Path
 import okio.Path.Companion.toPath
 import okio.fakefilesystem.FakeFileSystem
-import java.nio.file.Files
 
 class SpaceCheckTest {
 
@@ -72,14 +71,6 @@ class SpaceCheckTest {
     }
 
     @Test
-    fun `the default probe reports a positive figure for a real directory`() {
-        // jvm-only behavior of the default probe; moves to jvmTest in Task 7
-        val temp = Files.createTempDirectory("ferry-test")
-        val tempPath = temp.toString().toPath()
-        assertTrue(DefaultFreeSpaceProbe.freeBytes(tempPath) > 0L)
-    }
-
-    @Test
     fun `the probe is asked about the target directory`() {
         var asked: Path? = null
         val targetPath = "/downloads".toPath()
@@ -87,29 +78,5 @@ class SpaceCheckTest {
             .check(manifestOf(1L), targetPath)
 
         assertEquals(targetPath, asked)
-    }
-
-    /**
-     * `File.usableSpace` returns 0 — not an exception — for a path that does not exist, and
-     * `SpaceCheck` is public, exported on the `api` configuration: a host preflighting with
-     * `SpaceCheck().check(manifest, File(filesDir, "models"))` on a clean install, before that
-     * directory is ever created, would otherwise see "nothing fits" regardless of how much space is
-     * actually free. `temp.newFolder` is used only for the parent, never for the directory under
-     * test itself — that call creates the folder, which is exactly the condition this test must not
-     * have; a `TemporaryFolder`-backed suite is why 100 pre-existing tests never saw this bug.
-     */
-    @Test
-    fun `the default probe reports the volume's real free space for a directory that does not exist yet`() {
-        // jvm-only behavior of the default probe; moves to jvmTest in Task 7
-        val parentDir = Files.createTempDirectory("ferry-test-parent")
-        val missing = "${parentDir}/fresh-install".toPath()
-
-        val report = SpaceCheck().check(manifestOf(1L), missing)
-
-        assertTrue(
-            report.freeBytes > 0L,
-            "must report the volume's real free space, not the phantom zero usableSpace reports " +
-                "for a path that does not exist yet",
-        )
     }
 }

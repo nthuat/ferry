@@ -1,7 +1,6 @@
 package dev.thuat.ferry
 
 import io.ktor.client.HttpClient
-import io.ktor.client.engine.okhttp.OkHttp
 import okio.FileSystem
 
 /**
@@ -47,6 +46,3 @@ object Ferry {
         fileSystem = fileSystem,
     )
 }
-
-// becomes expect/actual in Task 7
-internal fun defaultHttpClient(): HttpClient = HttpClient(OkHttp)

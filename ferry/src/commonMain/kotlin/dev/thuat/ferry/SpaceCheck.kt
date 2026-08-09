@@ -2,9 +2,6 @@ package dev.thuat.ferry
 
 import okio.FileSystem
 import okio.Path
-import okio.Path.Companion.toOkioPath
-import okio.Path.Companion.toPath
-import java.io.File
 
 /**
  * The answer to "can this download finish?", produced before the first byte is requested.
@@ -26,9 +23,6 @@ data class SpaceReport(
 fun interface FreeSpaceProbe {
     fun freeBytes(dir: Path): Long
 }
-
-/** Free bytes on the volume holding [path]. Becomes the expect/actual platform leaf in Task 7. */
-internal fun availableBytes(path: Path): Long = path.toFile().usableSpace
 
 /**
  * The nearest ancestor of [dir] that already exists on disk — [dir] itself, if it already does.

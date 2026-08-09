@@ -1,22 +1,13 @@
 package dev.thuat.ferry
 
-import io.ktor.client.HttpClient
-import io.ktor.client.engine.okhttp.OkHttp
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
-import okhttp3.Interceptor
-import okhttp3.OkHttpClient
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
-import okio.Path.Companion.toOkioPath
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import okio.Path.Companion.toPath
 import okio.fakefilesystem.FakeFileSystem
-import org.junit.After
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
-import org.junit.Before
-import org.junit.Test
-import java.nio.file.Files
 
 /**
  * Ferry has to slot into a host that already decided how it backgrounds work and how it talks HTTP.
@@ -48,13 +39,13 @@ class EmbeddabilityTest {
         ] }
     """.trimIndent()
 
-    @Before
+    @BeforeTest
     fun setUp() {
         fs.createDirectories(root)
         queue = QueueClient()
     }
 
-    @After
+    @AfterTest
     fun tearDown() = fs.checkNoOpenFiles()
 
     /**
@@ -73,9 +64,9 @@ class EmbeddabilityTest {
         ferry.download("Qwen/Q-0.5B", root)
 
         assertEquals(
-            "manifest and file requests must both be visible to the host",
             2,
             queue.requests.size,
+            "manifest and file requests must both be visible to the host",
         )
         assertTrue(queue.requests.any { it.url.encodedPath.contains("/tree/main") })
         assertTrue(queue.requests.any { it.url.encodedPath.contains("/resolve/main/config.json") })
@@ -91,9 +82,9 @@ class EmbeddabilityTest {
         ferry.download("owner/model", root)
 
         assertEquals(
-            "manifest and file requests must both be visible to the host",
             2,
             queue.requests.size,
+            "manifest and file requests must both be visible to the host",
         )
         assertTrue(queue.requests.any { it.url.encodedPath.endsWith("/repo/files") })
         assertTrue(queue.requests.any { it.url.encodedPath.endsWith("/repo") })
@@ -109,9 +100,9 @@ class EmbeddabilityTest {
         ferry.download("qwen2.5:0.5b", root)
 
         assertEquals(
-            "manifest and blob requests must both be visible to the host",
             2,
             queue.requests.size,
+            "manifest and blob requests must both be visible to the host",
         )
         assertTrue(queue.requests.any { it.url.encodedPath.contains("/manifests/") })
         assertTrue(queue.requests.any { it.url.encodedPath.contains("/blobs/") })
@@ -133,47 +124,5 @@ class EmbeddabilityTest {
 
         assertTrue(result.isSuccess)
         assertTrue(progress.last() is RepoProgress.Complete)
-    }
-
-    // jvm-only: moves to jvmTest in Task 7
-    /**
-     * The interceptor test's other value, beyond `queue.requests`' proof above: a host that hands
-     * over its own raw OkHttpClient — interceptors included, not just a bare Ktor client — still
-     * gets every request through it. MockWebServer and a real temp dir are jvm-only, unlike the
-     * QueueClient tests above, which is why this one is not ported to the other platforms this
-     * facade will target from Task 7 on.
-     */
-    @Test
-    fun `a preconfigured okhttp client's interceptors see every request`() {
-        val seenByHost = mutableListOf<String>()
-        val hostClient = OkHttpClient.Builder()
-            .addInterceptor(Interceptor { chain ->
-                seenByHost += chain.request().url.encodedPath
-                chain.proceed(chain.request())
-            })
-            .build()
-
-        val server = MockWebServer().apply { start() }
-        try {
-            server.enqueue(MockResponse().setBody(treeJson))
-            server.enqueue(MockResponse().setBody(configBody))
-
-            val tempDir = Files.createTempDirectory("ferry-embeddability-test").toOkioPath()
-            val ferry = Ferry.huggingFace(
-                client = HttpClient(OkHttp) { engine { preconfigured = hostClient } },
-                baseUrl = server.url("/").toString().trimEnd('/'),
-            )
-            runBlocking { ferry.download("Qwen/Q-0.5B", tempDir) }
-
-            assertEquals(
-                "manifest and file requests must both be visible to the host",
-                2,
-                seenByHost.size,
-            )
-            assertTrue(seenByHost.any { it.contains("/tree/main") })
-            assertTrue(seenByHost.any { it.contains("/resolve/main/config.json") })
-        } finally {
-            server.shutdown()
-        }
     }
 }
