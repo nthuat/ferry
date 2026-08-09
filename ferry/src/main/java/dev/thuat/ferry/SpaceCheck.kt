@@ -6,9 +6,6 @@ import okio.Path.Companion.toOkioPath
 import okio.Path.Companion.toPath
 import java.io.File
 
-/** Convert a File to an okio.Path for interop with okio APIs. */
-fun File.toOkioPath(): Path = absolutePath.toPath()
-
 /**
  * The answer to "can this download finish?", produced before the first byte is requested.
  *
