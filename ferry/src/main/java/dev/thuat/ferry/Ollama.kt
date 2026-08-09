@@ -17,7 +17,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
-import java.io.IOException
+import okio.IOException
 
 /**
  * Reads image manifests from registry.ollama.ai's OCI distribution API.

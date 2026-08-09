@@ -1,24 +1,21 @@
 package dev.thuat.ferry
 
-import kotlinx.coroutines.runBlocking
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
-import okio.Path.Companion.toOkioPath
-import org.junit.After
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
-import org.junit.Before
-import org.junit.Rule
-import org.junit.Test
-import org.junit.rules.TemporaryFolder
-import java.io.File
+import io.ktor.http.HttpStatusCode
+import kotlinx.coroutines.test.runTest
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
+import okio.Path.Companion.toPath
+import okio.fakefilesystem.FakeFileSystem
 
 class FerryTest {
 
-    @get:Rule
-    val temp = TemporaryFolder()
+    private val fs = FakeFileSystem()
+    private val root = "/downloads".toPath()
 
-    private lateinit var server: MockWebServer
+    private lateinit var queue: QueueClient
 
     private val configBody = """{"model_type":"qwen2"}"""
 
@@ -26,45 +23,47 @@ class FerryTest {
         [ { "type": "file", "path": "config.json", "size": ${configBody.length} } ]
     """.trimIndent()
 
-    @Before
+    @BeforeTest
     fun setUp() {
-        server = MockWebServer().apply { start() }
+        fs.createDirectories(root)
+        queue = QueueClient()
     }
 
-    @After
-    fun tearDown() {
-        server.shutdown()
+    @AfterTest
+    fun tearDown() = fs.checkNoOpenFiles()
+
+    private fun huggingFace() = Ferry.huggingFace(
+        client = queue.client,
+        fileSystem = fs,
+        baseUrl = "http://hub.test",
+    )
+
+    @Test
+    fun `fetches a repo end to end through the facade`() = runTest {
+        queue.enqueue(body = treeJson)
+        queue.enqueue(body = configBody)
+
+        val dir = huggingFace().download("Qwen/Q-0.5B", root).getOrThrow()
+
+        assertEquals(configBody, fs.read(dir / "config.json") { readUtf8() })
     }
 
     @Test
-    fun `fetches a repo end to end through the facade`() {
-        server.enqueue(MockResponse().setBody(treeJson))
-        server.enqueue(MockResponse().setBody(configBody))
-
-        val ferry = Ferry.huggingFace(baseUrl = server.url("/").toString().trimEnd('/'))
-        val dir = runBlocking { ferry.download("Qwen/Q-0.5B", temp.root.toOkioPath()) }.getOrThrow()
-
-        assertEquals(configBody, File(dir.toFile(), "config.json").readText())
-    }
-
-    @Test
-    fun `the facade reports progress`() {
-        server.enqueue(MockResponse().setBody(treeJson))
-        server.enqueue(MockResponse().setBody(configBody))
+    fun `the facade reports progress`() = runTest {
+        queue.enqueue(body = treeJson)
+        queue.enqueue(body = configBody)
 
         val seen = mutableListOf<RepoProgress>()
-        val ferry = Ferry.huggingFace(baseUrl = server.url("/").toString().trimEnd('/'))
-        runBlocking { ferry.download("Qwen/Q-0.5B", temp.root.toOkioPath()) { seen += it } }
+        huggingFace().download("Qwen/Q-0.5B", root) { seen += it }
 
         assertTrue(seen.last() is RepoProgress.Complete)
     }
 
     @Test
-    fun `a missing repo is a failure, not an exception`() {
-        server.enqueue(MockResponse().setResponseCode(404))
+    fun `a missing repo is a failure, not an exception`() = runTest {
+        queue.enqueue(status = HttpStatusCode.NotFound)
 
-        val ferry = Ferry.huggingFace(baseUrl = server.url("/").toString().trimEnd('/'))
-        val result = runBlocking { ferry.download("nope/nope", temp.root.toOkioPath()) }
+        val result = huggingFace().download("nope/nope", root)
 
         assertTrue(result.isFailure)
     }

@@ -3,18 +3,20 @@ package dev.thuat.ferry
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okio.Path.Companion.toOkioPath
+import okio.Path.Companion.toPath
+import okio.fakefilesystem.FakeFileSystem
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
-import org.junit.Rule
 import org.junit.Test
-import org.junit.rules.TemporaryFolder
+import java.nio.file.Files
 
 /**
  * Ferry has to slot into a host that already decided how it backgrounds work and how it talks HTTP.
@@ -22,10 +24,10 @@ import org.junit.rules.TemporaryFolder
  */
 class EmbeddabilityTest {
 
-    @get:Rule
-    val temp = TemporaryFolder()
+    private val fs = FakeFileSystem()
+    private val root = "/downloads".toPath()
 
-    private lateinit var server: MockWebServer
+    private lateinit var queue: QueueClient
 
     private val configBody = """{"model_type":"qwen2"}"""
 
@@ -48,118 +50,71 @@ class EmbeddabilityTest {
 
     @Before
     fun setUp() {
-        server = MockWebServer().apply { start() }
+        fs.createDirectories(root)
+        queue = QueueClient()
     }
 
     @After
-    fun tearDown() {
-        server.shutdown()
-    }
+    fun tearDown() = fs.checkNoOpenFiles()
 
     /**
      * Every request, for the manifest and for the files, must travel through the client the host
-     * handed over. A host's auth interceptor that fires on some requests and not others is worse
-     * than one that never fires, because it works in testing.
+     * handed over. `queue.requests` is the proof: it only ever grows from inside the QueueClient's
+     * own engine, so a request that reached the server without going through `queue.client` — the
+     * one Ferry was handed — would simply never appear in it, stronger than tallying an interceptor
+     * that could itself be skipped by an unwrapped client.
      */
     @Test
-    fun `every request goes through the caller's http client`() {
-        val seenByHost = mutableListOf<String>()
-        val hostClient = OkHttpClient.Builder()
-            .addInterceptor(Interceptor { chain ->
-                seenByHost += chain.request().url.encodedPath
-                chain.proceed(chain.request())
-            })
-            .build()
+    fun `every request goes through the caller's http client`() = runTest {
+        queue.enqueue(body = treeJson)
+        queue.enqueue(body = configBody)
 
-        server.enqueue(MockResponse().setBody(treeJson))
-        server.enqueue(MockResponse().setBody(configBody))
-
-        val ferry = Ferry.huggingFace(
-            // Ferry's factories take an HttpClient now (Task 5); this test's whole point is that a
-            // host's own OkHttpClient — interceptors included — is the one every request travels
-            // through, so it stays OkHttp-typed above and is wrapped here rather than switched to a
-            // plain Ktor client that would lose the interceptor. Task 6 gives Ferry a real
-            // OkHttpClient-friendly entry point; this bridge is a minimal compile fix, not that.
-            client = HttpClient(OkHttp) { engine { preconfigured = hostClient } },
-            baseUrl = server.url("/").toString().trimEnd('/'),
-        )
-        runBlocking { ferry.download("Qwen/Q-0.5B", temp.root.toOkioPath()) }
+        val ferry = Ferry.huggingFace(client = queue.client, fileSystem = fs, baseUrl = "http://hub.test")
+        ferry.download("Qwen/Q-0.5B", root)
 
         assertEquals(
             "manifest and file requests must both be visible to the host",
             2,
-            seenByHost.size,
+            queue.requests.size,
         )
-        assertTrue(seenByHost.any { it.contains("/tree/main") })
-        assertTrue(seenByHost.any { it.contains("/resolve/main/config.json") })
+        assertTrue(queue.requests.any { it.url.encodedPath.contains("/tree/main") })
+        assertTrue(queue.requests.any { it.url.encodedPath.contains("/resolve/main/config.json") })
     }
 
     /** Same guarantee as above, for the second hub — a distinct adapter, easy to wire in wrong. */
     @Test
-    fun `every modelscope request goes through the caller's http client`() {
-        val seenByHost = mutableListOf<String>()
-        val hostClient = OkHttpClient.Builder()
-            .addInterceptor(Interceptor { chain ->
-                seenByHost += chain.request().url.encodedPath
-                chain.proceed(chain.request())
-            })
-            .build()
+    fun `every modelscope request goes through the caller's http client`() = runTest {
+        queue.enqueue(body = modelScopeListingJson)
+        queue.enqueue(body = configBody)
 
-        server.enqueue(MockResponse().setBody(modelScopeListingJson))
-        server.enqueue(MockResponse().setBody(configBody))
-
-        val ferry = Ferry.modelScope(
-            // Ferry's factories take an HttpClient now (Task 5); this test's whole point is that a
-            // host's own OkHttpClient — interceptors included — is the one every request travels
-            // through, so it stays OkHttp-typed above and is wrapped here rather than switched to a
-            // plain Ktor client that would lose the interceptor. Task 6 gives Ferry a real
-            // OkHttpClient-friendly entry point; this bridge is a minimal compile fix, not that.
-            client = HttpClient(OkHttp) { engine { preconfigured = hostClient } },
-            baseUrl = server.url("/").toString().trimEnd('/'),
-        )
-        runBlocking { ferry.download("owner/model", temp.root.toOkioPath()) }
+        val ferry = Ferry.modelScope(client = queue.client, fileSystem = fs, baseUrl = "http://hub.test")
+        ferry.download("owner/model", root)
 
         assertEquals(
             "manifest and file requests must both be visible to the host",
             2,
-            seenByHost.size,
+            queue.requests.size,
         )
-        assertTrue(seenByHost.any { it.endsWith("/repo/files") })
-        assertTrue(seenByHost.any { it.endsWith("/repo") })
+        assertTrue(queue.requests.any { it.url.encodedPath.endsWith("/repo/files") })
+        assertTrue(queue.requests.any { it.url.encodedPath.endsWith("/repo") })
     }
 
     /** Same guarantee again, for the third hub - a structurally different adapter, not just a third copy. */
     @Test
-    fun `every ollama request goes through the caller's http client`() {
-        val seenByHost = mutableListOf<String>()
-        val hostClient = OkHttpClient.Builder()
-            .addInterceptor(Interceptor { chain ->
-                seenByHost += chain.request().url.encodedPath
-                chain.proceed(chain.request())
-            })
-            .build()
+    fun `every ollama request goes through the caller's http client`() = runTest {
+        queue.enqueue(body = ollamaManifestJson)
+        queue.enqueue(body = configBody)
 
-        server.enqueue(MockResponse().setBody(ollamaManifestJson))
-        server.enqueue(MockResponse().setBody(configBody))
-
-        val ferry = Ferry.ollama(
-            // Ferry's factories take an HttpClient now (Task 5); this test's whole point is that a
-            // host's own OkHttpClient — interceptors included — is the one every request travels
-            // through, so it stays OkHttp-typed above and is wrapped here rather than switched to a
-            // plain Ktor client that would lose the interceptor. Task 6 gives Ferry a real
-            // OkHttpClient-friendly entry point; this bridge is a minimal compile fix, not that.
-            client = HttpClient(OkHttp) { engine { preconfigured = hostClient } },
-            baseUrl = server.url("/").toString().trimEnd('/'),
-        )
-        runBlocking { ferry.download("qwen2.5:0.5b", temp.root.toOkioPath()) }
+        val ferry = Ferry.ollama(client = queue.client, fileSystem = fs, baseUrl = "http://hub.test")
+        ferry.download("qwen2.5:0.5b", root)
 
         assertEquals(
             "manifest and blob requests must both be visible to the host",
             2,
-            seenByHost.size,
+            queue.requests.size,
         )
-        assertTrue(seenByHost.any { it.contains("/manifests/") })
-        assertTrue(seenByHost.any { it.contains("/blobs/") })
+        assertTrue(queue.requests.any { it.url.encodedPath.contains("/manifests/") })
+        assertTrue(queue.requests.any { it.url.encodedPath.contains("/blobs/") })
     }
 
     /**
@@ -168,17 +123,57 @@ class EmbeddabilityTest {
      * embeddable in something that is not structured like the sample app.
      */
     @Test
-    fun `the api is exercisable without any android object`() {
-        server.enqueue(MockResponse().setBody(treeJson))
-        server.enqueue(MockResponse().setBody(configBody))
+    fun `the api is exercisable without any android object`() = runTest {
+        queue.enqueue(body = treeJson)
+        queue.enqueue(body = configBody)
 
         val progress = mutableListOf<RepoProgress>()
-        val result = runBlocking {
-            Ferry.huggingFace(baseUrl = server.url("/").toString().trimEnd('/'))
-                .download("Qwen/Q-0.5B", temp.root.toOkioPath()) { progress += it }
-        }
+        val result = Ferry.huggingFace(client = queue.client, fileSystem = fs, baseUrl = "http://hub.test")
+            .download("Qwen/Q-0.5B", root) { progress += it }
 
         assertTrue(result.isSuccess)
         assertTrue(progress.last() is RepoProgress.Complete)
+    }
+
+    // jvm-only: moves to jvmTest in Task 7
+    /**
+     * The interceptor test's other value, beyond `queue.requests`' proof above: a host that hands
+     * over its own raw OkHttpClient — interceptors included, not just a bare Ktor client — still
+     * gets every request through it. MockWebServer and a real temp dir are jvm-only, unlike the
+     * QueueClient tests above, which is why this one is not ported to the other platforms this
+     * facade will target from Task 7 on.
+     */
+    @Test
+    fun `a preconfigured okhttp client's interceptors see every request`() {
+        val seenByHost = mutableListOf<String>()
+        val hostClient = OkHttpClient.Builder()
+            .addInterceptor(Interceptor { chain ->
+                seenByHost += chain.request().url.encodedPath
+                chain.proceed(chain.request())
+            })
+            .build()
+
+        val server = MockWebServer().apply { start() }
+        try {
+            server.enqueue(MockResponse().setBody(treeJson))
+            server.enqueue(MockResponse().setBody(configBody))
+
+            val tempDir = Files.createTempDirectory("ferry-embeddability-test").toOkioPath()
+            val ferry = Ferry.huggingFace(
+                client = HttpClient(OkHttp) { engine { preconfigured = hostClient } },
+                baseUrl = server.url("/").toString().trimEnd('/'),
+            )
+            runBlocking { ferry.download("Qwen/Q-0.5B", tempDir) }
+
+            assertEquals(
+                "manifest and file requests must both be visible to the host",
+                2,
+                seenByHost.size,
+            )
+            assertTrue(seenByHost.any { it.contains("/tree/main") })
+            assertTrue(seenByHost.any { it.contains("/resolve/main/config.json") })
+        } finally {
+            server.shutdown()
+        }
     }
 }
