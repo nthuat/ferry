@@ -1,6 +1,13 @@
 package dev.thuat.ferry
 
+import okio.FileSystem
+import okio.Path
+import okio.Path.Companion.toOkioPath
+import okio.Path.Companion.toPath
 import java.io.File
+
+/** Convert a File to an okio.Path for interop with okio APIs. */
+fun File.toOkioPath(): Path = absolutePath.toPath()
 
 /**
  * The answer to "can this download finish?", produced before the first byte is requested.
@@ -20,8 +27,11 @@ data class SpaceReport(
 
 /** Indirection so tests can state a free-space figure instead of filling a real disk. */
 fun interface FreeSpaceProbe {
-    fun freeBytes(dir: File): Long
+    fun freeBytes(dir: Path): Long
 }
+
+/** Free bytes on the volume holding [path]. Becomes the expect/actual platform leaf in Task 7. */
+internal fun availableBytes(path: Path): Long = path.toFile().usableSpace
 
 /**
  * The nearest ancestor of [dir] that already exists on disk — [dir] itself, if it already does.
@@ -36,8 +46,8 @@ fun interface FreeSpaceProbe {
  * only place this library runs (see docs/known-limitations.md). Falls back to [dir] itself if
  * nothing above it exists either, so this is never worse than probing [dir] directly would have been.
  */
-private fun nearestExistingAncestor(dir: File): File =
-    generateSequence(dir) { it.parentFile }.firstOrNull { it.exists() } ?: dir
+private fun nearestExistingAncestor(fileSystem: FileSystem, dir: Path): Path =
+    generateSequence(dir) { it.parent }.firstOrNull { fileSystem.exists(it) } ?: dir
 
 /**
  * `usableSpace` works on Android and on the JVM. Android's StatFs reports the same number and is
@@ -51,7 +61,9 @@ private fun nearestExistingAncestor(dir: File): File =
  * preflight call is exactly the kind of use this library expects — the same phantom zero would have
  * hit it too had this stayed a `RepoDownloader`-only fix.
  */
-val DefaultFreeSpaceProbe = FreeSpaceProbe { dir -> nearestExistingAncestor(dir).usableSpace }
+val DefaultFreeSpaceProbe = FreeSpaceProbe { dir ->
+    availableBytes(nearestExistingAncestor(FileSystem.SYSTEM, dir))
+}
 
 /**
  * Guarantee 3 — never start what cannot finish.
@@ -65,7 +77,7 @@ class SpaceCheck(
     private val headroomBytes: Long = DEFAULT_HEADROOM_BYTES,
 ) {
 
-    fun check(manifest: RepoManifest, targetDir: File): SpaceReport = SpaceReport(
+    fun check(manifest: RepoManifest, targetDir: Path): SpaceReport = SpaceReport(
         requiredBytes = manifest.totalBytes,
         freeBytes = probe.freeBytes(targetDir),
         headroomBytes = headroomBytes,

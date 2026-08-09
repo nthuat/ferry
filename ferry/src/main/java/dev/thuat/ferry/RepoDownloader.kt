@@ -270,7 +270,7 @@ class RepoDownloader(
             val satisfiedPaths = manifest.files
                 .filter { it.isSatisfiedIn(stagingDir) }
                 .mapTo(HashSet()) { it.path }
-            val report = spaceCheck.check(manifest.creditingStaged(stagingDir, satisfiedPaths), into)
+            val report = spaceCheck.check(manifest.creditingStaged(stagingDir, satisfiedPaths), into.toOkioPath())
             if (!report.sufficient) {
                 return@withContext Result.failure(InsufficientSpaceException(report))
             }
