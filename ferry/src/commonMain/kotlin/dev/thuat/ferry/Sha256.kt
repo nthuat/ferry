@@ -5,6 +5,7 @@ import okio.HashingSink
 import okio.Path
 import okio.blackholeSink
 import okio.buffer
+import okio.use
 
 /**
  * Guarantee 2 — never a corrupt model.

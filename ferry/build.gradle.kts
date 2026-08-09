@@ -28,13 +28,16 @@ kotlin {
             // same embeddability argument the OkHttp dependency carried before.
             api("com.squareup.okio:okio:3.9.1")
             api("io.ktor:ktor-client-core:3.2.3")
-            api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+            // 1.10.2, not 1.9.0: Ktor 3.2.3's native (iOS) klibs already pull coroutines-core to
+            // 1.10.2 transitively — this makes the declaration honest rather than a stale floor
+            // Gradle silently overrides on every apple target.
+            api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
             // Stays implementation: serialization appears in no public signature, only inside HuggingFace.
             implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
-            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+            implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
             implementation("io.ktor:ktor-client-mock:3.2.3")
             implementation("com.squareup.okio:okio-fakefilesystem:3.9.1")
         }

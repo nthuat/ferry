@@ -19,6 +19,7 @@ import kotlinx.coroutines.withContext
 import okio.FileSystem
 import okio.IOException
 import okio.Path
+import okio.use
 
 /**
  * Resumable download over HTTP range requests.
