@@ -13,9 +13,6 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
-import okhttp3.OkHttpClient
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
 import okio.ForwardingFileSystem
 import okio.Path
 import okio.Path.Companion.toPath
@@ -922,11 +919,12 @@ class RepoDownloaderTest {
      * End-to-end version of `HuggingFaceTest`'s equivalent, wired through the real adapter rather
      * than `fakeRepo`. Proves the whole pipeline fails at `repo.manifest(repoId)`, the very first
      * line of `download()`, so the escaped URL is never fetched and no second request happens —
-     * asserted on the server's own request count, not only on the `Result`.
+     * asserted on the request count, not only on the `Result`.
      *
-     * `HuggingFace` itself is unconverted (still OkHttp-based; a later task's scope), so this one
-     * test keeps a real `MockWebServer` scoped to its own body rather than routing through [queue] —
-     * `HuggingFace.manifest()` never reaches `downloader`, so [queue]'s client stands in unused.
+     * `HuggingFace` now shares [queue] with `downloader` rather than a separate real server — both
+     * are backed by the same single-engine [QueueClient] (Task 5), so one request count covers both
+     * the tree listing `HuggingFace.manifest()` issues and any file request `downloader` would have
+     * issued had the escape not been caught first.
      *
      * Revert-checked and found **not to isolate `HuggingFace`'s new namespace check specifically**:
      * with that check disabled, this test still passes, because `resolveInside(stagingDir,
@@ -943,28 +941,21 @@ class RepoDownloaderTest {
      */
     @Test
     fun `a hub-supplied file path that traverses out of HuggingFace's resolve namespace is refused before any download request`() {
-        val server = MockWebServer().apply { start() }
-        try {
-            val hf = HuggingFace(OkHttpClient(), baseUrl = server.url("/").toString().trimEnd('/'))
-            val evilPath = "../../../../other/repo/resolve/main/secret.bin"
-            server.enqueue(
-                MockResponse().setBody("""[ { "type": "file", "path": "$evilPath", "size": 5 } ]"""),
-            )
-            val downloader = RepoDownloader(
-                repo = hf,
-                downloader = ResumableDownloader(queue.client, fs, UnconfinedTestDispatcher()),
-                spaceCheck = SpaceCheck(probe = { Long.MAX_VALUE }, headroomBytes = 0L),
-                fileSystem = fs,
-                dispatcher = UnconfinedTestDispatcher(),
-            )
+        val hf = HuggingFace(queue.client, baseUrl = "http://hub.test")
+        val evilPath = "../../../../other/repo/resolve/main/secret.bin"
+        queue.enqueue("""[ { "type": "file", "path": "$evilPath", "size": 5 } ]""")
+        val downloader = RepoDownloader(
+            repo = hf,
+            downloader = ResumableDownloader(queue.client, fs, UnconfinedTestDispatcher()),
+            spaceCheck = SpaceCheck(probe = { Long.MAX_VALUE }, headroomBytes = 0L),
+            fileSystem = fs,
+            dispatcher = UnconfinedTestDispatcher(),
+        )
 
-            val result = await { downloader.download("owner/model", root) }
+        val result = await { downloader.download("owner/model", root) }
 
-            assertTrue(result.isFailure)
-            assertEquals(1, server.requestCount, "only the tree listing may be requested, never the escaped file")
-        } finally {
-            server.shutdown()
-        }
+        assertTrue(result.isFailure)
+        assertEquals(1, queue.requests.size, "only the tree listing may be requested, never the escaped file")
     }
 
     /** The escape check must reject only real escapes, not ordinary subdirectories within a repo. */

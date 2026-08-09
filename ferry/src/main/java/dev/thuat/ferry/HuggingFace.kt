@@ -1,14 +1,20 @@
 package dev.thuat.ferry
 
+import io.ktor.client.HttpClient
+import io.ktor.client.request.get
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.HttpHeaders
+import io.ktor.http.URLBuilder
+import io.ktor.http.URLParserException
+import io.ktor.http.Url
+import io.ktor.http.appendPathSegments
+import io.ktor.http.isSuccess
+import io.ktor.http.parseUrl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
-import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import java.io.IOException
 
 /**
@@ -18,7 +24,7 @@ import java.io.IOException
  * case this supports today.
  */
 class HuggingFace(
-    private val client: OkHttpClient,
+    private val client: HttpClient,
     private val baseUrl: String = "https://huggingface.co",
 ) : ModelHub {
 
@@ -31,16 +37,16 @@ class HuggingFace(
     // whatever dispatcher the caller happened to be on.
     override suspend fun manifest(repoId: String): Result<RepoManifest> = withContext(Dispatchers.IO) {
         try {
-            val base = baseUrl.toHttpUrlOrNull()
+            val base = parseUrl(baseUrl)
                 ?: return@withContext Result.failure(IOException("invalid base URL: $baseUrl"))
 
             val entries = mutableListOf<TreeEntry>()
-            // repoId travels through addPathSegments rather than string interpolation, so a "?" or
-            // "#" inside it is percent-encoded into inert segment text, and a "&" is left as a literal
-            // character that is inert for a different reason: a path segment has no structural meaning
-            // for "&" the way a query string does. None of the three can be reinterpreted as a query
-            // or fragment delimiter — pinned by HuggingFaceTest against the actual request produced,
-            // not just argued for here.
+            // repoId travels through appendPathSegmentsResolvingDots rather than string
+            // interpolation, so a "?" or "#" inside it is percent-encoded into inert segment text,
+            // and a "&" is left as a literal character that is inert for a different reason: a path
+            // segment has no structural meaning for "&" the way a query string does. None of the
+            // three can be reinterpreted as a query or fragment delimiter — pinned by
+            // HuggingFaceTest against the actual request produced, not just argued for here.
             //
             // This replaces what used to be a denylist (URL_DELIMITERS) rejecting those three
             // characters outright, which named the bad character in the error immediately. That
@@ -55,13 +61,15 @@ class HuggingFace(
             //
             // ".." used to be argued away by this same paragraph, and that was wrong: a denylist is a
             // claim about which repo ids are legal, and ".." is not an id-shape question at all — it's
-            // addPathSegments doing exactly what it always does, popping the segment before it. No
-            // denylist reasoning applies to it either way, which is what made deferring to "the hub is
-            // the authority on valid ids" a non sequitur here. requireWithinNamespace below checks the
-            // *built URL* instead, after this call has already decided what it meant to request: it
-            // says nothing about which repo ids are legal, only that this request still lands under
-            // this adapter's own models namespace, so it can't go stale the way a denylist can. See
-            // docs/known-limitations.md, which now documents this as closed rather than deferred.
+            // [appendPathSegmentsResolvingDots] doing exactly what OkHttp's own addPathSegments always
+            // did, popping the segment before it (Ktor's own appendPathSegments does not — see that
+            // function's KDoc). No denylist reasoning applies to it either way, which is what made
+            // deferring to "the hub is the authority on valid ids" a non sequitur here.
+            // requireWithinNamespace below checks the *built URL* instead, after this call has already
+            // decided what it meant to request: it says nothing about which repo ids are legal, only
+            // that this request still lands under this adapter's own models namespace, so it can't go
+            // stale the way a denylist can. See docs/known-limitations.md, which now documents this as
+            // closed rather than deferred.
             //
             // namespace is computed off `base`, not a literal "api/models" constant: baseUrl is a
             // public parameter (a self-hosted mirror is a contemplated configuration, see
@@ -76,14 +84,14 @@ class HuggingFace(
             // repo with unet/, vae/ or onnx/ subtrees would list a fraction of its files, download
             // that fraction, and report a complete model — with totalBytes short by the difference,
             // which also makes the free-space precheck under-reserve.
-            val namespace = base.newBuilder().addPathSegments("api/models").build()
-            var url = namespace.newBuilder()
-                .addPathSegments(repoId)
-                .addPathSegments("tree/main")
-                .addQueryParameter("recursive", "true")
-                .build()
-                .also { requireWithinNamespace(it, namespace.pathSegments, "repoId '$repoId'") }
-                .toString()
+            val namespace = URLBuilder(base).appendPathSegments("api", "models").build()
+            val firstUrlBuilder = URLBuilder(namespace)
+                .appendPathSegmentsResolvingDots(repoId)
+                .appendPathSegments("tree", "main")
+            firstUrlBuilder.parameters.append("recursive", "true")
+            val firstUrl = firstUrlBuilder.build()
+                .also { requireWithinNamespace(it, namespace.segments, "repoId '$repoId'") }
+            var url = firstUrl.toString()
             var pages = 0
 
             // A page caps at 1000 entries and points at the next with a Link header. Recursion made
@@ -95,29 +103,24 @@ class HuggingFace(
                         IOException("tree listing for $repoId exceeded $MAX_PAGES pages"),
                     )
                 }
-                val request = Request.Builder().url(url).build()
-                val next = client.newCall(request).execute().use { response ->
-                    if (!response.isSuccessful) {
-                        return@withContext Result.failure(
-                            IOException("HTTP ${response.code} listing $repoId"),
-                        )
-                    }
-                    val body = response.body?.string()
-                        ?: return@withContext Result.failure(
-                            IOException("empty tree response for $repoId"),
-                        )
-                    entries += json.decodeFromString<List<TreeEntry>>(body)
-                    // headers(), not header(): the latter returns one field value, and repeated
-                    // Link: fields are equivalent to one comma-joined field (RFC 7230 3.2.2). A
-                    // response splitting next and prev across two fields would otherwise yield
-                    // whichever one header() picked, and a prev link ends the loop — the same
-                    // silent truncation, arriving from a hub-side change with no deploy here.
-                    nextLink(response.headers("Link").joinToString(","))
-                } ?: break
+                val response = client.get(url)
+                if (!response.status.isSuccess()) {
+                    return@withContext Result.failure(
+                        IOException("HTTP ${response.status.value} listing $repoId"),
+                    )
+                }
+                val body = response.bodyAsText()
+                entries += json.decodeFromString<List<TreeEntry>>(body)
+                // getAll(), not the single-value accessor: repeated Link: fields are equivalent to
+                // one comma-joined field (RFC 7230 3.2.2). A response splitting next and prev across
+                // two fields would otherwise yield only one of them, and a prev link ends the loop —
+                // the same silent truncation, arriving from a hub-side change with no deploy here.
+                val next = nextLink((response.headers.getAll(HttpHeaders.Link) ?: emptyList()).joinToString(","))
+                    ?: break
 
                 // Reassigned to the server's own next-page URL as-is, not rebuilt through
-                // HttpUrl.Builder: sameOriginOrNull already proves it parses and shares baseUrl's
-                // origin, and rebuilding a URL the server already encoded would risk re-encoding it —
+                // URLBuilder: sameOriginOrNull already proves it parses and shares baseUrl's origin,
+                // and rebuilding a URL the server already encoded would risk re-encoding it —
                 // turning an already-correct URL into a wrong one.
                 url = sameOriginOrNull(next)
                     ?: return@withContext Result.failure(
@@ -141,20 +144,14 @@ class HuggingFace(
             Result.success(RepoManifest(repoId = repoId, files = files))
         } catch (e: IOException) {
             Result.failure(e)
+        } catch (e: URLParserException) {
+            // Ktor's request builders throw URLParserException on a malformed URL where OkHttp's own
+            // Request.Builder threw IllegalArgumentException — caught here at the adapter's boundary,
+            // same as any other failure this function reports, rather than escaping as a crash.
+            Result.failure(IOException("malformed URL for $repoId", e))
         } catch (e: SerializationException) {
             Result.failure(IOException("malformed tree response for $repoId", e))
         }
-        // No IllegalArgumentException catch, checked rather than assumed against okhttp 4.12.0's own
-        // source: Request.Builder().url(String) can only throw by calling String.toHttpUrl(), and
-        // every string this method ever hands it has already been proven to parse before it gets
-        // there. The first page's url comes from the HttpUrl.Builder chain above, whose build() throws
-        // only IllegalStateException — and only for a null scheme or host, which cannot happen off a
-        // newBuilder() of the already-validated `base`. Every later page's url is the server's `next`,
-        // but only after sameOriginOrNull has already called url.toHttpUrlOrNull() on that exact
-        // string — which is defined as nothing but a try/catch around toHttpUrl() — so by the time it
-        // reaches Request.Builder().url(...) here it is already proven not to throw. A catch here
-        // would be exactly as dead as ModelScope's own, checked here across both of this file's
-        // request sites (the first page and every following one) rather than the one ModelScope has.
     }
 
     /**
@@ -185,7 +182,7 @@ class HuggingFace(
      * [url] if it is on the same origin as [baseUrl] — scheme, host and port — null otherwise.
      *
      * The next-page URL is chosen by the server, so following it as given would let a hostile or
-     * compromised hub aim this client — carrying whatever the host app's OkHttpClient carries — at
+     * compromised hub aim this client — carrying whatever the host app's [HttpClient] carries — at
      * any address it names, an internal one included. Pagination is the one place in this adapter
      * where a request target comes from the response rather than from the caller.
      *
@@ -194,21 +191,21 @@ class HuggingFace(
      * of `http://<same host>:22/…` through. No hub pages on a different port than it lists on.
      */
     private fun sameOriginOrNull(url: String): String? {
-        val base = baseUrl.toHttpUrlOrNull() ?: return null
-        val next = url.toHttpUrlOrNull() ?: return null
+        val base = parseUrl(baseUrl) ?: return null
+        val next = parseUrl(url) ?: return null
         return url.takeIf {
-            next.scheme == base.scheme && next.host == base.host && next.port == base.port
+            next.protocol.name == base.protocol.name && next.host == base.host && next.port == base.port
         }
     }
 
     /**
      * Where to fetch [path] from, inside [repoId], at the `main` revision.
      *
-     * Mirrors [ModelScope]'s private `downloadUrl`: built with [HttpUrl.Builder] rather than
-     * interpolated into a string, so a `?` or `#` in [repoId] or [path] is percent-encoded into inert
-     * segment text, and a `&` is left as a literal character that is inert for a different reason — a
-     * path segment has no structural meaning for `&` the way a query string does. None of the three
-     * can be reinterpreted as a query or fragment delimiter.
+     * Mirrors [ModelScope]'s private `downloadUrl`: built with [URLBuilder] rather than interpolated
+     * into a string, so a `?` or `#` in [repoId] or [path] is percent-encoded into inert segment
+     * text, and a `&` is left as a literal character that is inert for a different reason — a path
+     * segment has no structural meaning for `&` the way a query string does. None of the three can
+     * be reinterpreted as a query or fragment delimiter.
      *
      * Checked against a **computed**, not literal, prefix — unlike the tree-listing URL above, nothing
      * adapter-owned precedes [repoId] here, so `"api/models"` is not the right thing to assert (it is
@@ -216,10 +213,10 @@ class HuggingFace(
      * would reject every legitimate download). The prefix this call actually intends is
      * `{repoId}/resolve/main` — everything before [path] — which is exactly [intended] below, built
      * once with [path] left off and reused both to assert against and to extend. [repoId]'s own `..`
-     * cannot violate this: confirmed against okhttp 4.12.0, nothing precedes [repoId] in *this* method
-     * for it to pop, and `resolve`/`main` are pushed by a later, independent `addPathSegments` call
-     * that nothing processed earlier can reach back into — so [intended] always ends in `resolve`,
-     * `main` regardless of [repoId]'s content, and the check on it is a no-op for that vector.
+     * cannot violate this: nothing adapter-owned precedes [repoId] in *this* method for it to pop, and
+     * `resolve`/`main` are appended by a later, independent [appendPathSegments] call that nothing
+     * processed earlier can reach back into — so [intended] always ends in `resolve`, `main`
+     * regardless of [repoId]'s content, and the check on it is a no-op for that vector.
      *
      * [path] is a different story: it comes from the hub's own manifest over the network, not from
      * [repoId], and it is appended *after* [intended] is already fixed — a `path` of
@@ -230,15 +227,15 @@ class HuggingFace(
      * whatever directory the caller passed — nothing previously asserted this URL stays where this
      * call meant it to, independent of that. [requireWithinNamespace] now does.
      */
-    private fun downloadUrl(base: HttpUrl, repoId: String, path: String): String {
-        val intended = base.newBuilder()
-            .addPathSegments(repoId)
-            .addPathSegments("resolve/main")
+    private fun downloadUrl(base: Url, repoId: String, path: String): String {
+        val intended = URLBuilder(base)
+            .appendPathSegmentsResolvingDots(repoId)
+            .appendPathSegments("resolve", "main")
             .build()
-        val full = intended.newBuilder()
-            .addPathSegments(path)
+        val full = URLBuilder(intended)
+            .appendPathSegmentsResolvingDots(path)
             .build()
-        requireWithinNamespace(full, intended.pathSegments, "path '$path' for repoId '$repoId'")
+        requireWithinNamespace(full, intended.segments, "path '$path' for repoId '$repoId'")
         return full.toString()
     }
 
@@ -261,8 +258,8 @@ class HuggingFace(
      * paths are legal; it only refuses to send a request that no longer targets the namespace this
      * call meant it for.
      */
-    private fun requireWithinNamespace(url: HttpUrl, prefix: List<String>, subject: String) {
-        if (url.pathSegments.take(prefix.size) != prefix) {
+    private fun requireWithinNamespace(url: Url, prefix: List<String>, subject: String) {
+        if (url.segments.take(prefix.size) != prefix) {
             throw IOException("$subject escaped its expected namespace: $url")
         }
     }

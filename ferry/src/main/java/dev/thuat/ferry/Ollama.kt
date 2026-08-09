@@ -1,14 +1,22 @@
 package dev.thuat.ferry
 
+import io.ktor.client.HttpClient
+import io.ktor.client.request.get
+import io.ktor.client.request.header
+import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.HttpHeaders
+import io.ktor.http.URLBuilder
+import io.ktor.http.URLParserException
+import io.ktor.http.Url
+import io.ktor.http.appendPathSegments
+import io.ktor.http.isSuccess
+import io.ktor.http.parseUrl
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
-import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import java.io.IOException
 
 /**
@@ -20,7 +28,7 @@ import java.io.IOException
  * two adapters below follows from that one fact.
  */
 class Ollama(
-    private val client: OkHttpClient,
+    private val client: HttpClient,
     private val baseUrl: String = "https://registry.ollama.ai",
 ) : ModelHub {
 
@@ -30,7 +38,7 @@ class Ollama(
     // being dropped because docs/known-limitations.md contemplates a host calling this directly.
     override suspend fun manifest(repoId: String): Result<RepoManifest> = withContext(Dispatchers.IO) {
         try {
-            val base = baseUrl.toHttpUrlOrNull()
+            val base = parseUrl(baseUrl)
                 ?: return@withContext Result.failure(IOException("invalid base URL: $baseUrl"))
 
             // repoId is Docker/Ollama reference shorthand, "[namespace/]name[:tag]":
@@ -45,122 +53,119 @@ class Ollama(
             val (namePart, tag) = splitTag(repoId)
             val qualifiedName = if ('/' in namePart) namePart else "library/$namePart"
 
-            // qualifiedName travels through addPathSegments rather than string interpolation, the
-            // same reason HuggingFace/ModelScope's repoId does (see ModelScope.manifest's KDoc): a
-            // "?", "#" or "&" inside it can't reinterpret this request's query, and a ".." inside
-            // qualifiedName can't escape the "v2" namespace either, because requireWithinNamespace
-            // below asserts the built URL still starts under "v2" - the one segment every OCI
-            // distribution request lives under - before the request is issued. A ".." positioned
-            // later - as tag itself, e.g. - can still pop "manifests" without ever popping below
-            // "v2", landing a same-origin, same-namespace request that is simply malformed rather
-            // than retargeted. That residual is accepted project-wide, not specific to this adapter
-            // (docs/known-limitations.md's "Residual" paragraph on this same mechanism).
+            // qualifiedName travels through appendPathSegmentsResolvingDots rather than string
+            // interpolation, the same reason HuggingFace/ModelScope's repoId does (see
+            // ModelScope.manifest's KDoc): a "?", "#" or "&" inside it can't reinterpret this
+            // request's query, and a ".." inside qualifiedName can't escape the "v2" namespace
+            // either, because requireWithinNamespace below asserts the built URL still starts under
+            // "v2" - the one segment every OCI distribution request lives under - before the request
+            // is issued. A ".." positioned later - as tag itself, e.g. - can still pop "manifests"
+            // without ever popping below "v2", landing a same-origin, same-namespace request that is
+            // simply malformed rather than retargeted. That residual is accepted project-wide, not
+            // specific to this adapter (docs/known-limitations.md's "Residual" paragraph on this same
+            // mechanism).
             val namespace = registryNamespace(base)
-            val manifestUrl = namespace.newBuilder()
-                .addPathSegments(qualifiedName)
-                .addPathSegment("manifests")
-                .addPathSegment(tag)
+            val manifestUrl = URLBuilder(namespace)
+                .appendPathSegmentsResolvingDots(qualifiedName)
+                .appendPathSegments("manifests", tag)
                 .build()
-                .also { requireWithinNamespace(it, namespace.pathSegments, "repoId '$repoId'") }
+                .also { requireWithinNamespace(it, namespace.segments, "repoId '$repoId'") }
 
-            val request = Request.Builder()
-                .url(manifestUrl)
+            val response: HttpResponse = client.get(manifestUrl.toString()) {
                 // Required, not a politeness header: verified live, omitting it answers a
                 // legacy-schema-shaped body instead of the config/layers shape this parser expects.
-                .header("Accept", MANIFEST_ACCEPT)
-                .build()
-
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    // An OCI registry's error body is structured ({"errors":[{"code","message"}]}),
-                    // not prose - surfaced when present, same spirit as ModelScope's own
-                    // `parsed.message` for an API-level failure, but here the transport status is
-                    // already the failure signal, so the body only ever adds detail, never changes
-                    // the verdict.
-                    val detail = response.body?.string()?.let { errorDetail(it) }
-                    return@withContext Result.failure(
-                        IOException(
-                            "HTTP ${response.code} for manifest $repoId" +
-                                (detail?.let { ": $it" } ?: ""),
-                        ),
-                    )
-                }
-                val body = response.body?.string()
-                    ?: return@withContext Result.failure(IOException("empty manifest for $repoId"))
-
-                val parsed = json.decodeFromString<ManifestResponse>(body)
-
-                // Every layer's digest is checked before any is mapped, rather than mapping and
-                // failing partway: a manifest half-translated into RemoteFiles is never handed back,
-                // only a complete one or none. Checked against the full "sha256:" + 64 lowercase hex
-                // shape, not just the prefix: OCI's digest grammar allows other algorithms, and
-                // RemoteFile.sha256 is specifically a SHA-256 - silently treating another algorithm's
-                // hex as though it were one would fail verification later, at download time, for a
-                // reason indistinguishable from real corruption. A prefix-only check would also let a
-                // malformed remainder - too short, uppercase, non-hex - land unvalidated directly in
-                // RemoteFile.path (see layerSuffix's own path-segment concern below for why an
-                // unvalidated string ending up in path is worth being strict about here too).
-                val badDigest = parsed.layers.map { it.digest }
-                    .firstOrNull { !SHA256_DIGEST.matches(it) }
-                if (badDigest != null) {
-                    return@withContext Result.failure(
-                        IOException("layer digest for $repoId is not a well-formed sha256 digest: $badDigest"),
-                    )
-                }
-
-                // config is deliberately not in files: the manifest carries `config` and `layers` as
-                // two different kinds of thing, not two pages of one list. `layers` is the model's
-                // content; `config` describes how to interpret it - the OCI-mandated Docker-image-
-                // config shape (rootfs, architecture, diff_ids) Ollama's own runtime consults, not
-                // something an inference engine loads. The layers already carry everything a consumer
-                // of the downloaded files needs: weights, projector, template, system prompt,
-                // license, parameters. ManifestResponse below does not even parse `config` -
-                // ignoreUnknownKeys drops it - so this is a real exclusion, not an oversight papered
-                // over by a filter. A future caller needing the raw config JSON has nowhere to read
-                // it from today; that would need a deliberate, additive change - another field on
-                // RepoManifest, or a second method - not a quiet addition to `files`.
-                val files = parsed.layers.map { layer ->
-                    val hex = layer.digest.removePrefix(SHA256_PREFIX)
-                    RemoteFile(
-                        // Two layers can share this path only if they share both a mediaType suffix
-                        // and a digest, and a shared digest means identical content by definition of
-                        // content-addressing - the same file referenced twice, not a collision. This
-                        // is what tells llama3.2-vision:11b's two "image.license" layers apart
-                        // (OllamaTest pins this exact shape): same suffix, different digest,
-                        // different path. Naming by suffix alone - the obvious mapping - collides
-                        // there and silently drops one, the same silent-truncation class
-                        // HuggingFace's non-recursive listing already cost this project once.
-                        path = "${layerSuffix(layer.mediaType)}-$hex",
-                        url = blobUrl(base, qualifiedName, layer.digest),
-                        sizeBytes = layer.size,
-                        sha256 = hex,
-                    )
-                }
-                    // The formula above is collision-resistant, not collision-proof, on its own: two
-                    // layers that share both suffix and digest - the same content, listed twice, not
-                    // merely similar content - still map to two RemoteFiles with an identical path,
-                    // and every layer is mapped unconditionally, so totalBytes would count those
-                    // bytes twice and SpaceCheck would over-reserve for them. distinctBy closes that
-                    // by treating identical-path entries as the one file they actually are.
-                    //
-                    // Deliberately keyed on path, not digest: two *different* suffixes can legitimately
-                    // share a digest - an empty "system" prompt and an empty "params" file hash the
-                    // same - and are two real, distinct files that must not collapse into one
-                    // (OllamaTest's "two layers with the same digest but different mediaType" pins
-                    // this). path already encodes both suffix and digest, so deduping on it dedupes
-                    // exactly the same-suffix-same-digest case and nothing broader.
-                    .distinctBy { it.path }
-                Result.success(RepoManifest(repoId = repoId, files = files))
+                header(HttpHeaders.Accept, MANIFEST_ACCEPT)
             }
+
+            if (!response.status.isSuccess()) {
+                // An OCI registry's error body is structured ({"errors":[{"code","message"}]}),
+                // not prose - surfaced when present, same spirit as ModelScope's own
+                // `parsed.message` for an API-level failure, but here the transport status is
+                // already the failure signal, so the body only ever adds detail, never changes
+                // the verdict.
+                val detail = errorDetail(response.bodyAsText())
+                return@withContext Result.failure(
+                    IOException(
+                        "HTTP ${response.status.value} for manifest $repoId" +
+                            (detail?.let { ": $it" } ?: ""),
+                    ),
+                )
+            }
+            val body = response.bodyAsText()
+
+            val parsed = json.decodeFromString<ManifestResponse>(body)
+
+            // Every layer's digest is checked before any is mapped, rather than mapping and
+            // failing partway: a manifest half-translated into RemoteFiles is never handed back,
+            // only a complete one or none. Checked against the full "sha256:" + 64 lowercase hex
+            // shape, not just the prefix: OCI's digest grammar allows other algorithms, and
+            // RemoteFile.sha256 is specifically a SHA-256 - silently treating another algorithm's
+            // hex as though it were one would fail verification later, at download time, for a
+            // reason indistinguishable from real corruption. A prefix-only check would also let a
+            // malformed remainder - too short, uppercase, non-hex - land unvalidated directly in
+            // RemoteFile.path (see layerSuffix's own path-segment concern below for why an
+            // unvalidated string ending up in path is worth being strict about here too).
+            val badDigest = parsed.layers.map { it.digest }
+                .firstOrNull { !SHA256_DIGEST.matches(it) }
+            if (badDigest != null) {
+                return@withContext Result.failure(
+                    IOException("layer digest for $repoId is not a well-formed sha256 digest: $badDigest"),
+                )
+            }
+
+            // config is deliberately not in files: the manifest carries `config` and `layers` as
+            // two different kinds of thing, not two pages of one list. `layers` is the model's
+            // content; `config` describes how to interpret it - the OCI-mandated Docker-image-
+            // config shape (rootfs, architecture, diff_ids) Ollama's own runtime consults, not
+            // something an inference engine loads. The layers already carry everything a consumer
+            // of the downloaded files needs: weights, projector, template, system prompt,
+            // license, parameters. ManifestResponse below does not even parse `config` -
+            // ignoreUnknownKeys drops it - so this is a real exclusion, not an oversight papered
+            // over by a filter. A future caller needing the raw config JSON has nowhere to read
+            // it from today; that would need a deliberate, additive change - another field on
+            // RepoManifest, or a second method - not a quiet addition to `files`.
+            val files = parsed.layers.map { layer ->
+                val hex = layer.digest.removePrefix(SHA256_PREFIX)
+                RemoteFile(
+                    // Two layers can share this path only if they share both a mediaType suffix
+                    // and a digest, and a shared digest means identical content by definition of
+                    // content-addressing - the same file referenced twice, not a collision. This
+                    // is what tells llama3.2-vision:11b's two "image.license" layers apart
+                    // (OllamaTest pins this exact shape): same suffix, different digest,
+                    // different path. Naming by suffix alone - the obvious mapping - collides
+                    // there and silently drops one, the same silent-truncation class
+                    // HuggingFace's non-recursive listing already cost this project once.
+                    path = "${layerSuffix(layer.mediaType)}-$hex",
+                    url = blobUrl(base, qualifiedName, layer.digest),
+                    sizeBytes = layer.size,
+                    sha256 = hex,
+                )
+            }
+                // The formula above is collision-resistant, not collision-proof, on its own: two
+                // layers that share both suffix and digest - the same content, listed twice, not
+                // merely similar content - still map to two RemoteFiles with an identical path,
+                // and every layer is mapped unconditionally, so totalBytes would count those
+                // bytes twice and SpaceCheck would over-reserve for them. distinctBy closes that
+                // by treating identical-path entries as the one file they actually are.
+                //
+                // Deliberately keyed on path, not digest: two *different* suffixes can legitimately
+                // share a digest - an empty "system" prompt and an empty "params" file hash the
+                // same - and are two real, distinct files that must not collapse into one
+                // (OllamaTest's "two layers with the same digest but different mediaType" pins
+                // this). path already encodes both suffix and digest, so deduping on it dedupes
+                // exactly the same-suffix-same-digest case and nothing broader.
+                .distinctBy { it.path }
+            Result.success(RepoManifest(repoId = repoId, files = files))
         } catch (e: IOException) {
             Result.failure(e)
+        } catch (e: URLParserException) {
+            // Ktor's request builders throw URLParserException on a malformed URL where OkHttp's own
+            // Request.Builder threw IllegalArgumentException — caught here at the adapter's boundary,
+            // same as any other failure this function reports, rather than escaping as a crash.
+            Result.failure(IOException("malformed URL for $repoId", e))
         } catch (e: SerializationException) {
             Result.failure(IOException("malformed manifest for $repoId", e))
         }
-        // No IllegalArgumentException catch, same reasoning as ModelScope.manifest: every URL here
-        // is either base (proven via toHttpUrlOrNull above) or built through HttpUrl.Builder, which
-        // encodes rather than throws, and Request.Builder().url(HttpUrl) - not the String overload -
-        // never throws IllegalArgumentException in the first place.
     }
 
     /**
@@ -172,14 +177,13 @@ class Ollama(
      * [registryNamespace] rather than receiving it as a parameter: kept safe to call in isolation,
      * not only from the one place it is actually called from today.
      */
-    private fun blobUrl(base: HttpUrl, qualifiedName: String, digest: String): String {
+    private fun blobUrl(base: Url, qualifiedName: String, digest: String): String {
         val namespace = registryNamespace(base)
-        val full = namespace.newBuilder()
-            .addPathSegments(qualifiedName)
-            .addPathSegment("blobs")
-            .addPathSegment(digest)
+        val full = URLBuilder(namespace)
+            .appendPathSegmentsResolvingDots(qualifiedName)
+            .appendPathSegments("blobs", digest)
             .build()
-        requireWithinNamespace(full, namespace.pathSegments, "repo name '$qualifiedName'")
+        requireWithinNamespace(full, namespace.segments, "repo name '$qualifiedName'")
         return full.toString()
     }
 
@@ -189,8 +193,8 @@ class Ollama(
      * is included in the namespace both call sites check against. Mirrors [ModelScope]'s own
      * `modelsNamespace`.
      */
-    private fun registryNamespace(base: HttpUrl): HttpUrl = base.newBuilder()
-        .addPathSegments("v2")
+    private fun registryNamespace(base: Url): Url = URLBuilder(base)
+        .appendPathSegments("v2")
         .build()
 
     /**
@@ -199,8 +203,8 @@ class Ollama(
      * applied here against this adapter's own namespace. See either for the full reasoning behind
      * checking the built URL rather than [subject]'s own text; not repeated here.
      */
-    private fun requireWithinNamespace(url: HttpUrl, prefix: List<String>, subject: String) {
-        if (url.pathSegments.take(prefix.size) != prefix) {
+    private fun requireWithinNamespace(url: Url, prefix: List<String>, subject: String) {
+        if (url.segments.take(prefix.size) != prefix) {
             throw IOException("$subject escaped the registry namespace: $url")
         }
     }

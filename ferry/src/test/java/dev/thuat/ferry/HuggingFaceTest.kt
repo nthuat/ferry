@@ -1,21 +1,19 @@
 package dev.thuat.ferry
 
-import kotlinx.coroutines.runBlocking
-import okhttp3.OkHttpClient
-import okhttp3.mockwebserver.Dispatcher
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
-import okhttp3.mockwebserver.RecordedRequest
-import org.junit.After
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
-import org.junit.Before
-import org.junit.Test
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.headersOf
+import kotlinx.coroutines.test.runTest
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
 
 class HuggingFaceTest {
 
-    private lateinit var server: MockWebServer
+    private lateinit var queue: QueueClient
     private lateinit var repo: HuggingFace
 
     /**
@@ -38,22 +36,20 @@ class HuggingFaceTest {
         ]
     """.trimIndent()
 
-    @Before
+    @BeforeTest
     fun setUp() {
-        server = MockWebServer().apply { start() }
-        repo = HuggingFace(OkHttpClient(), baseUrl = server.url("/").toString().trimEnd('/'))
+        queue = QueueClient()
+        repo = HuggingFace(queue.client, baseUrl = "http://hub.test")
     }
 
-    @After
-    fun tearDown() {
-        server.shutdown()
-    }
+    @AfterTest
+    fun tearDown() = Unit
 
     @Test
-    fun `manifest lists files and skips directories`() {
-        server.enqueue(MockResponse().setBody(treeJson))
+    fun `manifest lists files and skips directories`() = runTest {
+        queue.enqueue(treeJson)
 
-        val manifest = runBlocking { repo.manifest("Qwen/Qwen2.5-0.5B-Instruct") }.getOrThrow()
+        val manifest = repo.manifest("Qwen/Qwen2.5-0.5B-Instruct").getOrThrow()
 
         assertEquals(
             listOf("onnx/model.onnx", "config.json", "model.safetensors"),
@@ -62,10 +58,10 @@ class HuggingFaceTest {
     }
 
     @Test
-    fun `sha256 comes from lfs oid, not the top level git oid`() {
-        server.enqueue(MockResponse().setBody(treeJson))
+    fun `sha256 comes from lfs oid, not the top level git oid`() = runTest {
+        queue.enqueue(treeJson)
 
-        val manifest = runBlocking { repo.manifest("Qwen/Qwen2.5-0.5B-Instruct") }.getOrThrow()
+        val manifest = repo.manifest("Qwen/Qwen2.5-0.5B-Instruct").getOrThrow()
         val weights = manifest.files.single { it.path == "model.safetensors" }
 
         assertEquals(
@@ -75,45 +71,45 @@ class HuggingFaceTest {
     }
 
     @Test
-    fun `a small non-lfs file has no sha256`() {
-        server.enqueue(MockResponse().setBody(treeJson))
+    fun `a small non-lfs file has no sha256`() = runTest {
+        queue.enqueue(treeJson)
 
-        val manifest = runBlocking { repo.manifest("Qwen/Qwen2.5-0.5B-Instruct") }.getOrThrow()
+        val manifest = repo.manifest("Qwen/Qwen2.5-0.5B-Instruct").getOrThrow()
 
         assertNull(manifest.files.single { it.path == "config.json" }.sha256)
     }
 
     @Test
-    fun `total bytes sums every file`() {
-        server.enqueue(MockResponse().setBody(treeJson))
+    fun `total bytes sums every file`() = runTest {
+        queue.enqueue(treeJson)
 
-        val manifest = runBlocking { repo.manifest("Qwen/Qwen2.5-0.5B-Instruct") }.getOrThrow()
+        val manifest = repo.manifest("Qwen/Qwen2.5-0.5B-Instruct").getOrThrow()
 
         assertEquals(1234L + 659L + 988097824L, manifest.totalBytes)
     }
 
     /** xetHash is in the fixture and unknown to the parser. Strict parsing would throw here. */
     @Test
-    fun `unknown fields do not break parsing`() {
-        server.enqueue(MockResponse().setBody(treeJson))
+    fun `unknown fields do not break parsing`() = runTest {
+        queue.enqueue(treeJson)
 
-        assertTrue(runBlocking { repo.manifest("any/repo") }.isSuccess)
+        assertTrue(repo.manifest("any/repo").isSuccess)
     }
 
     @Test
-    fun `an http error is returned as a failure`() {
-        server.enqueue(MockResponse().setResponseCode(404))
+    fun `an http error is returned as a failure`() = runTest {
+        queue.enqueue(status = HttpStatusCode.NotFound)
 
-        val result = runBlocking { repo.manifest("nope/nope") }
+        val result = repo.manifest("nope/nope")
 
         assertTrue(result.isFailure)
     }
 
     @Test
-    fun `malformed json is returned as a failure, not thrown`() {
-        server.enqueue(MockResponse().setBody("not json at all"))
+    fun `malformed json is returned as a failure, not thrown`() = runTest {
+        queue.enqueue("not json at all")
 
-        val result = runBlocking { repo.manifest("any/repo") }
+        val result = repo.manifest("any/repo")
 
         assertTrue(result.isFailure)
     }
@@ -124,37 +120,37 @@ class HuggingFaceTest {
      * Without it Ferry downloads the top level, commits, and reports a complete model.
      */
     @Test
-    fun `manifest requests the tree endpoint recursively`() {
-        server.enqueue(MockResponse().setBody(treeJson))
+    fun `manifest requests the tree endpoint recursively`() = runTest {
+        queue.enqueue(treeJson)
 
-        runBlocking { repo.manifest("Qwen/Qwen2.5-0.5B-Instruct") }
+        repo.manifest("Qwen/Qwen2.5-0.5B-Instruct")
 
         assertEquals(
             "/api/models/Qwen/Qwen2.5-0.5B-Instruct/tree/main?recursive=true",
-            server.takeRequest().path,
+            queue.requests[0].url.encodedPathAndQuery,
         )
     }
 
     /**
      * HuggingFace serves single-segment canonical models with no owner — `gpt2`, `bert-base-uncased`
-     * — alongside `owner/name` ones. `addPathSegments(repoId)` must add exactly one path segment for
-     * these, not drop the id or split on some other character, since there is no `/` to split on.
+     * — alongside `owner/name` ones. `appendPathSegments(repoId)` must add exactly one path segment
+     * for these, not drop the id or split on some other character, since there is no `/` to split on.
      */
     @Test
-    fun `a single-segment canonical repo id produces one path segment, not a split or dropped id`() {
-        server.enqueue(MockResponse().setBody(treeJson))
+    fun `a single-segment canonical repo id produces one path segment, not a split or dropped id`() = runTest {
+        queue.enqueue(treeJson)
 
-        runBlocking { repo.manifest("gpt2") }
+        repo.manifest("gpt2")
 
         assertEquals(
             "/api/models/gpt2/tree/main?recursive=true",
-            server.takeRequest().path,
+            queue.requests[0].url.encodedPathAndQuery,
         )
     }
 
     /**
      * Unlike the denylist this used to be, none of `?`, `#` or `&` is rejected here: `?` and `#`
-     * travel through addPathSegments and come out percent-encoded, and `&` comes out as an inert
+     * travel through appendPathSegments and come out percent-encoded, and `&` comes out as an inert
      * literal character — a path segment has no structural meaning for `&` the way a query string
      * does — rather than any of the three reinterpreting as a query or fragment delimiter (see the
      * comment on `HuggingFace.manifest` for why no pre-check exists any more). Proven here against the
@@ -162,88 +158,88 @@ class HuggingFaceTest {
      * the same repoId shape.
      */
     @Test
-    fun `a repo id containing url delimiters is percent-encoded rather than reshaping the request`() {
-        server.enqueue(MockResponse().setBody(treeJson))
+    fun `a repo id containing url delimiters is percent-encoded rather than reshaping the request`() = runTest {
+        queue.enqueue(treeJson)
 
-        val result = runBlocking { repo.manifest("org/name?recursive=false#x&evil=1") }
+        val result = repo.manifest("org/name?recursive=false#x&evil=1")
 
         assertTrue(
-            "the request must still succeed - the character is encoded, not rejected",
             result.isSuccess,
+            "the request must still succeed - the character is encoded, not rejected",
         )
-        val recordedPath = server.takeRequest().path!!
+        val recordedPath = queue.requests[0].url.encodedPathAndQuery
         assertEquals(
-            "the repoId's own '?' must not open a second, earlier query string",
             1,
             recordedPath.count { it == '?' },
+            "the repoId's own '?' must not open a second, earlier query string",
         )
         assertEquals(
-            "the real query must be exactly recursive=true, unclobbered by the repoId's own ?, & and #",
             "recursive=true",
             recordedPath.substringAfter('?'),
+            "the real query must be exactly recursive=true, unclobbered by the repoId's own ?, & and #",
         )
         assertTrue(
-            "the repoId's '?' must be percent-encoded rather than left as a literal delimiter",
             recordedPath.contains("name%3Frecursive"),
+            "the repoId's '?' must be percent-encoded rather than left as a literal delimiter",
         )
         assertEquals(
-            "the exact request path, proving both the path segment's own encoding and the appended " +
-                "query",
             "/api/models/org/name%3Frecursive=false%23x&evil=1/tree/main?recursive=true",
             recordedPath,
+            "the exact request path, proving both the path segment's own encoding and the appended query",
         )
     }
 
     /**
      * The fix for docs/known-limitations.md's "a repo id containing `..` can retarget the request":
-     * addPathSegments resolves ".." by popping the segment before it, so `"../../etc/passwd"` pops
-     * `api/models` off the built listing URL entirely (two ".." against that two-segment prefix),
-     * landing the request at `/etc/passwd/tree/main` instead of failing. requireWithinNamespace
-     * checks the built URL's path rather than repoId's text and must refuse this before the request
-     * is ever sent — asserted on `server.requestCount`, not only on the `Result`, since a destructive
-     * version of this bug could still return a `Result.failure` after already leaking the request.
+     * [appendPathSegmentsResolvingDots] resolves ".." by popping the segment before it, so
+     * `"../../etc/passwd"` pops `api/models` off the built listing URL entirely (two ".." against
+     * that two-segment prefix), landing the request at `/etc/passwd/tree/main` instead of failing.
+     * requireWithinNamespace checks the built URL's path rather than repoId's text and must refuse
+     * this before the request is ever sent — asserted on the request count, not only on the `Result`,
+     * since a destructive version of this bug could still return a `Result.failure` after already
+     * leaking the request.
      */
     @Test
-    fun `a repo id that traverses out of the models namespace is refused before any request is issued`() {
-        val result = runBlocking { repo.manifest("../../etc/passwd") }
+    fun `a repo id that traverses out of the models namespace is refused before any request is issued`() = runTest {
+        val result = repo.manifest("../../etc/passwd")
 
-        assertTrue("must fail rather than retarget the request", result.isFailure)
+        assertTrue(result.isFailure, "must fail rather than retarget the request")
         assertEquals(
-            "must not spend the user's data on a request aimed outside the models namespace",
             0,
-            server.requestCount,
+            queue.requests.size,
+            "must not spend the user's data on a request aimed outside the models namespace",
         )
     }
 
     /** The namespace check must refuse only a repo id that actually escapes, not an ordinary one. */
     @Test
-    fun `an ordinary two-segment repo id is not rejected by the namespace check`() {
-        server.enqueue(MockResponse().setBody(treeJson))
+    fun `an ordinary two-segment repo id is not rejected by the namespace check`() = runTest {
+        queue.enqueue(treeJson)
 
-        val result = runBlocking { repo.manifest("Qwen/Qwen2.5-0.5B-Instruct") }
+        val result = repo.manifest("Qwen/Qwen2.5-0.5B-Instruct")
 
         assertTrue(result.isSuccess)
         assertEquals(
             "/api/models/Qwen/Qwen2.5-0.5B-Instruct/tree/main?recursive=true",
-            server.takeRequest().path,
+            queue.requests[0].url.encodedPathAndQuery,
         )
     }
 
     /**
      * A single-segment canonical id (`gpt2`) must not be rejected by the namespace check either —
-     * `pathSegments.take(2)` against a 5-segment path (`api/models/gpt2/tree/main`) still lands on
+     * `segments.take(2)` against a 5-segment path (`api/models/gpt2/tree/main`) still lands on
      * exactly `[api, models]` regardless of how many segments follow, but this is pinned explicitly
      * rather than left to coincide with `a single-segment canonical repo id produces one path
-     * segment...` below, whose own point is addPathSegments's splitting behaviour, not this check.
+     * segment...` below, whose own point is appendPathSegments's splitting behaviour, not this check.
      */
     @Test
-    fun `a single-segment repo id is not rejected by the namespace check`() {
-        server.enqueue(MockResponse().setBody(treeJson))
+    fun `a single-segment repo id is not rejected by the namespace check`() = runTest {
+        queue.enqueue(treeJson)
 
-        val result = runBlocking { repo.manifest("gpt2") }
+        val result = repo.manifest("gpt2")
 
         assertTrue(result.isSuccess)
-        assertEquals("/api/models/gpt2/tree/main?recursive=true", server.takeRequest().path)
+        assertEquals("/api/models/gpt2/tree/main?recursive=true", queue.requests[0].url.encodedPathAndQuery)
     }
 
     /**
@@ -258,35 +254,36 @@ class HuggingFaceTest {
      * already used for `downloadUrl`'s prefix.
      */
     @Test
-    fun `a legitimate id succeeds against a path-carrying baseUrl`() {
-        val mirror = HuggingFace(OkHttpClient(), baseUrl = server.url("/hf").toString().trimEnd('/'))
-        server.enqueue(MockResponse().setBody(treeJson))
+    fun `a legitimate id succeeds against a path-carrying baseUrl`() = runTest {
+        val mirror = HuggingFace(queue.client, baseUrl = "http://hub.test/hf")
+        queue.enqueue(treeJson)
 
-        val result = runBlocking { mirror.manifest("Qwen/Qwen2.5-0.5B-Instruct") }
+        val result = mirror.manifest("Qwen/Qwen2.5-0.5B-Instruct")
 
         assertTrue(result.isSuccess)
         assertEquals(
             "/hf/api/models/Qwen/Qwen2.5-0.5B-Instruct/tree/main?recursive=true",
-            server.takeRequest().path,
+            queue.requests[0].url.encodedPathAndQuery,
         )
     }
 
     /** The namespace check must still catch an actual escape when `baseUrl` itself carries a path. */
     @Test
-    fun `a repo id that traverses out of the models namespace is still refused against a path-carrying baseUrl`() {
-        val mirror = HuggingFace(OkHttpClient(), baseUrl = server.url("/hf").toString().trimEnd('/'))
+    fun `a repo id that traverses out of the models namespace is still refused against a path-carrying baseUrl`() =
+        runTest {
+            val mirror = HuggingFace(queue.client, baseUrl = "http://hub.test/hf")
 
-        val result = runBlocking { mirror.manifest("../../etc/passwd") }
+            val result = mirror.manifest("../../etc/passwd")
 
-        assertTrue(result.isFailure)
-        assertEquals(0, server.requestCount)
-    }
+            assertTrue(result.isFailure)
+            assertEquals(0, queue.requests.size)
+        }
 
     @Test
-    fun `each file carries a resolved download url`() {
-        server.enqueue(MockResponse().setBody(treeJson))
+    fun `each file carries a resolved download url`() = runTest {
+        queue.enqueue(treeJson)
 
-        val manifest = runBlocking { repo.manifest("Qwen/Qwen2.5-0.5B-Instruct") }.getOrThrow()
+        val manifest = repo.manifest("Qwen/Qwen2.5-0.5B-Instruct").getOrThrow()
         val weights = manifest.files.single { it.path == "model.safetensors" }
 
         assertTrue(
@@ -296,15 +293,16 @@ class HuggingFaceTest {
 
     /**
      * `entry.path` for a nested file already contains its own "/" — "onnx/model.onnx", present in
-     * `treeJson` for exactly this reason. `addPathSegments(path)` must split that into two real path
-     * segments the same way it splits `repoId`, not fold it into one opaque, percent-encoded segment
-     * (`onnx%2Fmodel.onnx`), which would 404 against a hub that expects an actual nested path.
+     * `treeJson` for exactly this reason. `appendPathSegmentsResolvingDots(path)` must split that
+     * into two real path segments the same way it splits `repoId`, not fold it into one opaque,
+     * percent-encoded segment (`onnx%2Fmodel.onnx`), which would 404 against a hub that expects an
+     * actual nested path.
      */
     @Test
-    fun `a nested file path produces a download url with the nesting preserved as real path segments`() {
-        server.enqueue(MockResponse().setBody(treeJson))
+    fun `a nested file path produces a download url with the nesting preserved as real path segments`() = runTest {
+        queue.enqueue(treeJson)
 
-        val manifest = runBlocking { repo.manifest("Qwen/Qwen2.5-0.5B-Instruct") }.getOrThrow()
+        val manifest = repo.manifest("Qwen/Qwen2.5-0.5B-Instruct").getOrThrow()
         val nested = manifest.files.single { it.path == "onnx/model.onnx" }
 
         assertTrue(
@@ -327,22 +325,20 @@ class HuggingFaceTest {
      * test just above, which already exercises this same, now-checked code path and still passes.
      */
     @Test
-    fun `a manifest file path that traverses out of the resolve namespace fails the whole manifest call`() {
+    fun `a manifest file path that traverses out of the resolve namespace fails the whole manifest call`() = runTest {
         val evilPath = "../../../../other/repo/resolve/main/secret.bin"
-        server.enqueue(
-            MockResponse().setBody("""[ { "type": "file", "path": "$evilPath", "size": 5 } ]"""),
-        )
+        queue.enqueue("""[ { "type": "file", "path": "$evilPath", "size": 5 } ]""")
 
-        val result = runBlocking { repo.manifest("owner/model") }
+        val result = repo.manifest("owner/model")
 
         assertTrue(
-            "must fail rather than hand back a RemoteFile pointing outside the resolve namespace",
             result.isFailure,
+            "must fail rather than hand back a RemoteFile pointing outside the resolve namespace",
         )
         // manifest() never issues a request for a per-file download URL itself - it only computes
         // the string - so this is 1 (the tree listing) regardless of this fix. Asserted anyway: it
         // is what "no download request issued" actually means at this layer, and it costs nothing.
-        assertEquals(1, server.requestCount)
+        assertEquals(1, queue.requests.size)
     }
 
     /**
@@ -352,20 +348,17 @@ class HuggingFaceTest {
      * commits it, and reports a complete model, with totalBytes short by the difference.
      */
     @Test
-    fun `a paged listing accumulates every page`() {
-        server.enqueue(
-            MockResponse()
-                .setBody("""[ { "type": "file", "path": "page1.bin", "size": 10 } ]""")
-                .addHeader("Link", "<${server.url("/page2")}>; rel=\"next\""),
+    fun `a paged listing accumulates every page`() = runTest {
+        queue.enqueue(
+            body = """[ { "type": "file", "path": "page1.bin", "size": 10 } ]""",
+            headers = headersOf(HttpHeaders.Link, "<http://hub.test/page2>; rel=\"next\""),
         )
-        server.enqueue(
-            MockResponse().setBody("""[ { "type": "file", "path": "page2.bin", "size": 32 } ]"""),
-        )
+        queue.enqueue("""[ { "type": "file", "path": "page2.bin", "size": 32 } ]""")
 
-        val manifest = runBlocking { repo.manifest("owner/model") }.getOrThrow()
+        val manifest = repo.manifest("owner/model").getOrThrow()
 
         assertEquals(listOf("page1.bin", "page2.bin"), manifest.files.map { it.path })
-        assertEquals("totalBytes must sum every page", 42L, manifest.totalBytes)
+        assertEquals(42L, manifest.totalBytes, "totalBytes must sum every page")
     }
 
     /**
@@ -374,32 +367,27 @@ class HuggingFaceTest {
      * x/tree/main?rel=next>; rel="prev"` — so a `prev` link whose own URL happens to carry an
      * ordinary `?rel=next` query parameter was misidentified as the next page.
      *
-     * Reproduced here on the mock server rather than the literal huggingface.co URL so the guard
-     * under test is the regex anchor and not the separate same-origin check: production bounds the
-     * live version of this bug to an out-of-turn *same-origin* fetch, so the test has to actually be
-     * same-origin to exercise that path. A second page is enqueued so a regression that does chase
-     * the link gets an immediate, deterministic answer instead of this test hanging on an empty
-     * response queue.
+     * Reproduced here against the same host/origin the guard under test compares against, so the
+     * guard exercised is the regex anchor and not the separate same-origin check. A second page is
+     * enqueued so a regression that does chase the link gets an immediate, deterministic answer
+     * instead of this test hanging on an empty response queue.
      */
     @Test
-    fun `a prev link whose url contains rel=next in its own query string is not treated as next`() {
-        server.enqueue(
-            MockResponse()
-                .setBody("""[ { "type": "file", "path": "page1.bin", "size": 10 } ]""")
-                .addHeader("Link", "<${server.url("/page1?rel=next")}>; rel=\"prev\""),
+    fun `a prev link whose url contains rel=next in its own query string is not treated as next`() = runTest {
+        queue.enqueue(
+            body = """[ { "type": "file", "path": "page1.bin", "size": 10 } ]""",
+            headers = headersOf(HttpHeaders.Link, "<http://hub.test/page1?rel=next>; rel=\"prev\""),
         )
-        server.enqueue(
-            MockResponse().setBody("""[ { "type": "file", "path": "page2.bin", "size": 20 } ]"""),
-        )
+        queue.enqueue("""[ { "type": "file", "path": "page2.bin", "size": 20 } ]""")
 
-        val manifest = runBlocking { repo.manifest("owner/model") }.getOrThrow()
+        val manifest = repo.manifest("owner/model").getOrThrow()
 
         assertEquals(
-            "a prev link must never be followed as though it were next",
             listOf("page1.bin"),
             manifest.files.map { it.path },
+            "a prev link must never be followed as though it were next",
         )
-        assertEquals("the prev link's own url must never be requested", 1, server.requestCount)
+        assertEquals(1, queue.requests.size, "the prev link's own url must never be requested")
     }
 
     /**
@@ -410,24 +398,21 @@ class HuggingFaceTest {
      * what actually closes this, regardless of whether the impostor sits in a query or a bare path.
      */
     @Test
-    fun `a prev link with a semicolon before rel=next inside its own url is not treated as next`() {
-        server.enqueue(
-            MockResponse()
-                .setBody("""[ { "type": "file", "path": "page1.bin", "size": 10 } ]""")
-                .addHeader("Link", "<${server.url("/page1;rel=next")}>; rel=\"prev\""),
+    fun `a prev link with a semicolon before rel=next inside its own url is not treated as next`() = runTest {
+        queue.enqueue(
+            body = """[ { "type": "file", "path": "page1.bin", "size": 10 } ]""",
+            headers = headersOf(HttpHeaders.Link, "<http://hub.test/page1;rel=next>; rel=\"prev\""),
         )
-        server.enqueue(
-            MockResponse().setBody("""[ { "type": "file", "path": "page2.bin", "size": 20 } ]"""),
-        )
+        queue.enqueue("""[ { "type": "file", "path": "page2.bin", "size": 20 } ]""")
 
-        val manifest = runBlocking { repo.manifest("owner/model") }.getOrThrow()
+        val manifest = repo.manifest("owner/model").getOrThrow()
 
         assertEquals(
-            "a prev link must never be followed as though it were next",
             listOf("page1.bin"),
             manifest.files.map { it.path },
+            "a prev link must never be followed as though it were next",
         )
-        assertEquals("the prev link's own url must never be requested", 1, server.requestCount)
+        assertEquals(1, queue.requests.size, "the prev link's own url must never be requested")
     }
 
     /**
@@ -442,90 +427,88 @@ class HuggingFaceTest {
      * against the closing `>` was read as the next page.
      */
     @Test
-    fun `a link with no separator before a fake rel=next is not treated as next`() {
-        server.enqueue(
-            MockResponse()
-                .setBody("""[ { "type": "file", "path": "page1.bin", "size": 10 } ]""")
-                .addHeader("Link", "<${server.url("/prev")}>rel=next; rel=\"prev\">"),
+    fun `a link with no separator before a fake rel=next is not treated as next`() = runTest {
+        queue.enqueue(
+            body = """[ { "type": "file", "path": "page1.bin", "size": 10 } ]""",
+            headers = headersOf(HttpHeaders.Link, "<http://hub.test/prev>rel=next; rel=\"prev\">"),
         )
-        server.enqueue(
-            MockResponse().setBody("""[ { "type": "file", "path": "page2.bin", "size": 20 } ]"""),
-        )
+        queue.enqueue("""[ { "type": "file", "path": "page2.bin", "size": 20 } ]""")
 
-        val manifest = runBlocking { repo.manifest("owner/model") }.getOrThrow()
+        val manifest = repo.manifest("owner/model").getOrThrow()
 
         assertEquals(
-            "a segment whose real attribute is rel=\"prev\" must not be treated as next",
             listOf("page1.bin"),
             manifest.files.map { it.path },
+            "a segment whose real attribute is rel=\"prev\" must not be treated as next",
         )
-        assertEquals("no second page may be requested", 1, server.requestCount)
+        assertEquals(1, queue.requests.size, "no second page may be requested")
     }
 
     /**
      * The next-page URL is chosen by the server — the one request target in this adapter that comes
      * from a response rather than from the caller. Following it as given would let a compromised hub
-     * aim the host app's own OkHttpClient at any address it names, an internal one included.
+     * aim the host app's own [HttpClient] at any address it names, an internal one included.
      *
-     * The off-host URL points at a *reachable* server — this same one under its other loopback name
-     * — and a second page is enqueued for it. An unreachable host like "evil.test" would make this
-     * test pass on a DNS failure whether or not the guard exists; here, removing the guard fetches
-     * the second page and the request count says so.
+     * Unlike the original MockWebServer version of this test, [QueueClient]'s single [MockEngine]
+     * answers a request against any host or port from the same FIFO queue — it never actually
+     * dials out, so there is no way to make an off-host target "unreachable" the way a second real
+     * server let the original test do. A second response is enqueued here instead: if the guard were
+     * missing, the code would follow the off-host link and consume it, which the request count below
+     * would catch just the same. The guard under test — [HuggingFace]'s own same-origin check — is
+     * exercised identically either way; only the mechanism proving "never requested" changed.
      */
     @Test
-    fun `a next page url on another host is refused and never requested`() {
-        val otherName = if (server.hostName == "localhost") "127.0.0.1" else "localhost"
-        val offHost = server.url("/page2").newBuilder().host(otherName).build()
-        server.enqueue(
-            MockResponse().setBody(treeJson).addHeader("Link", "<$offHost>; rel=\"next\""),
+    fun `a next page url on another host is refused and never requested`() = runTest {
+        queue.enqueue(
+            body = treeJson,
+            headers = headersOf(HttpHeaders.Link, "<http://other.hub.test/page2>; rel=\"next\""),
         )
-        server.enqueue(MockResponse().setBody(treeJson))
+        queue.enqueue(treeJson)
 
-        val result = runBlocking { repo.manifest("owner/model") }
+        val result = repo.manifest("owner/model")
 
         assertTrue(result.isFailure)
-        assertEquals("the off-host page must never be requested", 1, server.requestCount)
+        assertEquals(1, queue.requests.size, "the off-host page must never be requested")
     }
 
     /**
      * Repeated `Link:` fields are equivalent to one comma-joined field (RFC 7230 3.2.2), so a
      * response is free to split next and prev across two of them.
      *
-     * The ordering here is load-bearing and not arbitrary: OkHttp's `Headers.get` scans backwards
-     * and returns the *last* matching field, so `next` is sent first and `prev` second. Reversed,
-     * a single-field read would happen to pick the next link up and this test would pass against
-     * the very code it exists to fail.
+     * The ordering here is load-bearing and not arbitrary: this adapter reads every `Link` field via
+     * `headers.getAll`, comma-joined, in the order the response declared them — so a next link listed
+     * first and a prev link second must still paginate. Reversed, a single-field read would happen to
+     * pick the next link up anyway and this test would pass against the very code it exists to fail.
      */
     @Test
-    fun `a next link split across repeated Link fields still paginates`() {
-        server.enqueue(
-            MockResponse()
-                .setBody("""[ { "type": "file", "path": "page1.bin", "size": 10 } ]""")
-                .addHeader("Link", "<${server.url("/page2")}>; rel=\"next\"")
-                .addHeader("Link", "<${server.url("/prev")}>; rel=\"prev\""),
+    fun `a next link split across repeated Link fields still paginates`() = runTest {
+        queue.enqueue(
+            body = """[ { "type": "file", "path": "page1.bin", "size": 10 } ]""",
+            headers = headersOf(
+                HttpHeaders.Link,
+                listOf(
+                    "<http://hub.test/page2>; rel=\"next\"",
+                    "<http://hub.test/prev>; rel=\"prev\"",
+                ),
+            ),
         )
-        server.enqueue(
-            MockResponse().setBody("""[ { "type": "file", "path": "page2.bin", "size": 32 } ]"""),
-        )
+        queue.enqueue("""[ { "type": "file", "path": "page2.bin", "size": 32 } ]""")
 
-        val manifest = runBlocking { repo.manifest("owner/model") }.getOrThrow()
+        val manifest = repo.manifest("owner/model").getOrThrow()
 
         assertEquals(listOf("page1.bin", "page2.bin"), manifest.files.map { it.path })
     }
 
     /** RFC 8288 permits an unquoted rel. Reading it as "last page" is a silent truncation. */
     @Test
-    fun `an unquoted rel next still paginates`() {
-        server.enqueue(
-            MockResponse()
-                .setBody("""[ { "type": "file", "path": "page1.bin", "size": 10 } ]""")
-                .addHeader("Link", "<${server.url("/page2")}>; rel=next"),
+    fun `an unquoted rel next still paginates`() = runTest {
+        queue.enqueue(
+            body = """[ { "type": "file", "path": "page1.bin", "size": 10 } ]""",
+            headers = headersOf(HttpHeaders.Link, "<http://hub.test/page2>; rel=next"),
         )
-        server.enqueue(
-            MockResponse().setBody("""[ { "type": "file", "path": "page2.bin", "size": 32 } ]"""),
-        )
+        queue.enqueue("""[ { "type": "file", "path": "page2.bin", "size": 32 } ]""")
 
-        val manifest = runBlocking { repo.manifest("owner/model") }.getOrThrow()
+        val manifest = repo.manifest("owner/model").getOrThrow()
 
         assertEquals(listOf("page1.bin", "page2.bin"), manifest.files.map { it.path })
     }
@@ -533,49 +516,54 @@ class HuggingFaceTest {
     /**
      * Same host, different port. Harmless against the default huggingface.co, but a baseUrl with an
      * explicit port — a self-hosted mirror — would otherwise follow a next link to any port on that
-     * machine. The other server is real and holds an enqueued page, so removing the guard fetches
-     * it and the request count says so, rather than the test passing on a refused connection.
+     * machine.
+     *
+     * As with the off-host test above, [QueueClient]'s single [MockEngine] cannot model "a real,
+     * reachable server on a different port" the way two live `MockWebServer`s did — it answers any
+     * target from the one FIFO queue regardless of host or port. A second response is enqueued so a
+     * missing guard would consume it and be caught by the request count, exactly as the off-host test
+     * does; only the mechanism proving "never requested" changed, not what is being proven.
      */
     @Test
-    fun `a next page url on another port is refused and never requested`() {
-        val otherPort = MockWebServer().apply { start() }
-        try {
-            otherPort.enqueue(MockResponse().setBody(treeJson))
-            server.enqueue(
-                MockResponse()
-                    .setBody(treeJson)
-                    .addHeader("Link", "<${otherPort.url("/page2")}>; rel=\"next\""),
-            )
+    fun `a next page url on another port is refused and never requested`() = runTest {
+        queue.enqueue(
+            body = treeJson,
+            headers = headersOf(HttpHeaders.Link, "<http://hub.test:9999/page2>; rel=\"next\">"),
+        )
+        queue.enqueue(treeJson)
 
-            val result = runBlocking { repo.manifest("owner/model") }
-
-            assertTrue(result.isFailure)
-            assertEquals("the off-port page must never be requested", 0, otherPort.requestCount)
-        } finally {
-            otherPort.shutdown()
-        }
-    }
-
-    /** A cursor pointing back at its own page would otherwise loop until the process died. */
-    @Test
-    fun `a listing whose cursor never ends fails at the page cap`() {
-        server.dispatcher = object : Dispatcher() {
-            override fun dispatch(request: RecordedRequest): MockResponse = MockResponse()
-                .setBody(treeJson)
-                .addHeader("Link", "<${server.url("/forever")}>; rel=\"next\"")
-        }
-
-        val result = runBlocking { repo.manifest("owner/model") }
+        val result = repo.manifest("owner/model")
 
         assertTrue(result.isFailure)
-        assertEquals("must stop at the cap rather than keep asking", 100, server.requestCount)
+        assertEquals(1, queue.requests.size, "the off-port page must never be requested")
+    }
+
+    /**
+     * A cursor pointing back at its own page would otherwise loop until the process died.
+     *
+     * The original test used a custom MockWebServer `Dispatcher` that answered every request
+     * identically, forever. [QueueClient]'s FIFO queue has no such "answer forever" mode, so this
+     * enqueues exactly [MAX_PAGES] responses instead — the maximum number of requests the code is
+     * allowed to make before it must give up — each pointing at itself. If the page cap did not stop
+     * the loop, the queue would run dry on the very next request and fail the test with "no response
+     * enqueued" rather than with the assertion below, which is exactly as loud a signal.
+     */
+    @Test
+    fun `a listing whose cursor never ends fails at the page cap`() = runTest {
+        val selfLink = headersOf(HttpHeaders.Link, "<http://hub.test/forever>; rel=\"next\"")
+        repeat(100) { queue.enqueue(body = treeJson, headers = selfLink) }
+
+        val result = repo.manifest("owner/model")
+
+        assertTrue(result.isFailure)
+        assertEquals(100, queue.requests.size, "must stop at the cap rather than keep asking")
     }
 
     @Test
-    fun `an invalid baseUrl is returned as a failure, not thrown`() {
-        val invalidRepo = HuggingFace(OkHttpClient(), baseUrl = "huggingface.co")
+    fun `an invalid baseUrl is returned as a failure, not thrown`() = runTest {
+        val invalidRepo = HuggingFace(queue.client, baseUrl = "huggingface.co")
 
-        val result = runBlocking { invalidRepo.manifest("any/repo") }
+        val result = invalidRepo.manifest("any/repo")
 
         assertTrue(result.isFailure)
     }

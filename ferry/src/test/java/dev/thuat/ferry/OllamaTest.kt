@@ -1,19 +1,17 @@
 package dev.thuat.ferry
 
-import kotlinx.coroutines.runBlocking
-import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.OkHttpClient
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
-import org.junit.After
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
-import org.junit.Before
-import org.junit.Test
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.Url
+import kotlinx.coroutines.test.runTest
+import kotlin.test.AfterTest
+import kotlin.test.BeforeTest
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class OllamaTest {
 
-    private lateinit var server: MockWebServer
+    private lateinit var queue: QueueClient
     private lateinit var repo: Ollama
 
     /**
@@ -87,22 +85,20 @@ class OllamaTest {
           ] }
     """.trimIndent()
 
-    @Before
+    @BeforeTest
     fun setUp() {
-        server = MockWebServer().apply { start() }
-        repo = Ollama(OkHttpClient(), baseUrl = server.url("/").toString().trimEnd('/'))
+        queue = QueueClient()
+        repo = Ollama(queue.client, baseUrl = "http://hub.test")
     }
 
-    @After
-    fun tearDown() {
-        server.shutdown()
-    }
+    @AfterTest
+    fun tearDown() = Unit
 
     @Test
-    fun `sha256 is the digest with its sha256 prefix stripped`() {
-        server.enqueue(MockResponse().setBody(basicManifestJson))
+    fun `sha256 is the digest with its sha256 prefix stripped`() = runTest {
+        queue.enqueue(basicManifestJson)
 
-        val manifest = runBlocking { repo.manifest("qwen2.5:0.5b") }.getOrThrow()
+        val manifest = repo.manifest("qwen2.5:0.5b").getOrThrow()
 
         assertEquals(
             "0ee70bd579839c5691f0ed80505934ecc07f8894cd5322fe0ecc2ea4a5a3b469",
@@ -115,20 +111,20 @@ class OllamaTest {
     }
 
     @Test
-    fun `size is mapped from each layer`() {
-        server.enqueue(MockResponse().setBody(basicManifestJson))
+    fun `size is mapped from each layer`() = runTest {
+        queue.enqueue(basicManifestJson)
 
-        val manifest = runBlocking { repo.manifest("qwen2.5:0.5b") }.getOrThrow()
+        val manifest = repo.manifest("qwen2.5:0.5b").getOrThrow()
 
         assertEquals(397807936L, manifest.files.single { it.path.startsWith("model-") }.sizeBytes)
         assertEquals(11343L, manifest.files.single { it.path.startsWith("license-") }.sizeBytes)
     }
 
     @Test
-    fun `total bytes sums every layer`() {
-        server.enqueue(MockResponse().setBody(basicManifestJson))
+    fun `total bytes sums every layer`() = runTest {
+        queue.enqueue(basicManifestJson)
 
-        val manifest = runBlocking { repo.manifest("qwen2.5:0.5b") }.getOrThrow()
+        val manifest = repo.manifest("qwen2.5:0.5b").getOrThrow()
 
         assertEquals(397807936L + 68L + 1482L + 11343L, manifest.totalBytes)
     }
@@ -139,10 +135,10 @@ class OllamaTest {
      * fixture must mean four files, and none of them the config's own digest.
      */
     @Test
-    fun `config is not included among the downloaded files`() {
-        server.enqueue(MockResponse().setBody(basicManifestJson))
+    fun `config is not included among the downloaded files`() = runTest {
+        queue.enqueue(basicManifestJson)
 
-        val manifest = runBlocking { repo.manifest("qwen2.5:0.5b") }.getOrThrow()
+        val manifest = repo.manifest("qwen2.5:0.5b").getOrThrow()
 
         assertEquals(4, manifest.files.size)
         assertTrue(
@@ -153,10 +149,10 @@ class OllamaTest {
     }
 
     @Test
-    fun `each file carries a blob url built from the qualified name and digest`() {
-        server.enqueue(MockResponse().setBody(basicManifestJson))
+    fun `each file carries a blob url built from the qualified name and digest`() = runTest {
+        queue.enqueue(basicManifestJson)
 
-        val manifest = runBlocking { repo.manifest("qwen2.5:0.5b") }.getOrThrow()
+        val manifest = repo.manifest("qwen2.5:0.5b").getOrThrow()
         val model = manifest.files.single { it.path.startsWith("model-") }
 
         assertEquals(
@@ -164,7 +160,7 @@ class OllamaTest {
                 "v2", "library", "qwen2.5", "blobs",
                 "sha256:0ee70bd579839c5691f0ed80505934ecc07f8894cd5322fe0ecc2ea4a5a3b469",
             ),
-            model.url.toHttpUrl().pathSegments,
+            Url(model.url).segments,
         )
     }
 
@@ -176,10 +172,10 @@ class OllamaTest {
      * exact fixture before committing.
      */
     @Test
-    fun `two layers of the same mediaType produce distinct paths, not a collision`() {
-        server.enqueue(MockResponse().setBody(visionCollisionJson))
+    fun `two layers of the same mediaType produce distinct paths, not a collision`() = runTest {
+        queue.enqueue(visionCollisionJson)
 
-        val manifest = runBlocking { repo.manifest("llama3.2-vision:11b") }.getOrThrow()
+        val manifest = repo.manifest("llama3.2-vision:11b").getOrThrow()
 
         assertEquals(5, manifest.files.size)
         assertEquals(5, manifest.files.map { it.path }.distinct().size)
@@ -197,10 +193,10 @@ class OllamaTest {
 
     /** The same fixture's total must include both license layers, not silently drop one. */
     @Test
-    fun `total bytes across the colliding layers is not short by the dropped one`() {
-        server.enqueue(MockResponse().setBody(visionCollisionJson))
+    fun `total bytes across the colliding layers is not short by the dropped one`() = runTest {
+        queue.enqueue(visionCollisionJson)
 
-        val manifest = runBlocking { repo.manifest("llama3.2-vision:11b") }.getOrThrow()
+        val manifest = repo.manifest("llama3.2-vision:11b").getOrThrow()
 
         assertEquals(6433703168L + 1565L + 6021L + 7680L + 59L, manifest.totalBytes)
     }
@@ -215,10 +211,10 @@ class OllamaTest {
      * before restoring it.
      */
     @Test
-    fun `two layers with identical mediaType and digest dedupe to one file, not double counted`() {
-        server.enqueue(MockResponse().setBody(exactDuplicateLayerJson))
+    fun `two layers with identical mediaType and digest dedupe to one file, not double counted`() = runTest {
+        queue.enqueue(exactDuplicateLayerJson)
 
-        val manifest = runBlocking { repo.manifest("dup:latest") }.getOrThrow()
+        val manifest = repo.manifest("dup:latest").getOrThrow()
 
         assertEquals(1, manifest.files.size)
         assertEquals(5000000L, manifest.totalBytes)
@@ -230,10 +226,10 @@ class OllamaTest {
      * "params" file both hash to the empty-string SHA-256 - and are two real, distinct files.
      */
     @Test
-    fun `two layers with the same digest but different mediaType stay two distinct files`() {
-        server.enqueue(MockResponse().setBody(sameDigestDifferentSuffixJson))
+    fun `two layers with the same digest but different mediaType stay two distinct files`() = runTest {
+        queue.enqueue(sameDigestDifferentSuffixJson)
 
-        val manifest = runBlocking { repo.manifest("shared-digest:latest") }.getOrThrow()
+        val manifest = repo.manifest("shared-digest:latest").getOrThrow()
 
         assertEquals(2, manifest.files.size)
         assertEquals(
@@ -246,61 +242,62 @@ class OllamaTest {
     }
 
     @Test
-    fun `manifest requests the tag given in the repo id`() {
-        server.enqueue(MockResponse().setBody(basicManifestJson))
+    fun `manifest requests the tag given in the repo id`() = runTest {
+        queue.enqueue(basicManifestJson)
 
-        runBlocking { repo.manifest("qwen2.5:0.5b") }
+        repo.manifest("qwen2.5:0.5b")
 
-        assertEquals("/v2/library/qwen2.5/manifests/0.5b", server.takeRequest().path)
+        assertEquals("/v2/library/qwen2.5/manifests/0.5b", queue.requests[0].url.encodedPath)
     }
 
     /** "a bare name with no tag, which conventionally means latest" - stated in Ollama's own KDoc. */
     @Test
-    fun `a bare repo id with no tag defaults to latest`() {
-        server.enqueue(MockResponse().setBody(basicManifestJson))
+    fun `a bare repo id with no tag defaults to latest`() = runTest {
+        queue.enqueue(basicManifestJson)
 
-        runBlocking { repo.manifest("llava") }
+        repo.manifest("llava")
 
-        assertEquals("/v2/library/llava/manifests/latest", server.takeRequest().path)
+        assertEquals("/v2/library/llava/manifests/latest", queue.requests[0].url.encodedPath)
     }
 
     /** A repoId that already names its own namespace must not also get "library/" prepended. */
     @Test
-    fun `a repo id that already carries a namespace is not re-prefixed with library`() {
-        server.enqueue(MockResponse().setBody(basicManifestJson))
+    fun `a repo id that already carries a namespace is not re-prefixed with library`() = runTest {
+        queue.enqueue(basicManifestJson)
 
-        runBlocking { repo.manifest("someuser/custom-model:v1") }
+        repo.manifest("someuser/custom-model:v1")
 
-        assertEquals("/v2/someuser/custom-model/manifests/v1", server.takeRequest().path)
+        assertEquals("/v2/someuser/custom-model/manifests/v1", queue.requests[0].url.encodedPath)
     }
 
     /** The Accept header is required - verified live, its absence gets a different response shape. */
     @Test
-    fun `manifest request carries the required docker manifest v2 accept header`() {
-        server.enqueue(MockResponse().setBody(basicManifestJson))
+    fun `manifest request carries the required docker manifest v2 accept header`() = runTest {
+        queue.enqueue(basicManifestJson)
 
-        runBlocking { repo.manifest("qwen2.5:0.5b") }
+        repo.manifest("qwen2.5:0.5b")
 
         assertEquals(
             "application/vnd.docker.distribution.manifest.v2+json",
-            server.takeRequest().getHeader("Accept"),
+            queue.requests[0].headers["Accept"],
         )
     }
 
     /**
      * The same fix as HuggingFace/ModelScope's own ".." entries in docs/known-limitations.md, applied
-     * here: addPathSegments resolves ".." by popping the segment before it, so this would otherwise
-     * land the request outside the "v2" namespace instead of failing. Asserted on requestCount, not
-     * only the Result, since a destructive version of this bug could still fail after already leaking
-     * the request.
+     * here: [appendPathSegmentsResolvingDots] resolves ".." by popping the segment before it, so this
+     * would otherwise land the request outside the "v2" namespace instead of failing. Asserted on the
+     * request count, not only the Result, since a destructive version of this bug could still fail
+     * after already leaking the request.
      */
     @Test
-    fun `a repo id that traverses out of the registry namespace is refused before any request is issued`() {
-        val result = runBlocking { repo.manifest("../../etc/passwd") }
+    fun `a repo id that traverses out of the registry namespace is refused before any request is issued`() =
+        runTest {
+            val result = repo.manifest("../../etc/passwd")
 
-        assertTrue("must fail rather than retarget the request", result.isFailure)
-        assertEquals(0, server.requestCount)
-    }
+            assertTrue(result.isFailure, "must fail rather than retarget the request")
+            assertEquals(0, queue.requests.size)
+        }
 
     /**
      * The regression HuggingFace and ModelScope each closed once (docs/known-limitations.md):
@@ -310,69 +307,69 @@ class OllamaTest {
      * if it hadn't.
      */
     @Test
-    fun `a legitimate id succeeds against a path-carrying baseUrl`() {
-        val mirror = Ollama(OkHttpClient(), baseUrl = server.url("/hf").toString().trimEnd('/'))
-        server.enqueue(MockResponse().setBody(basicManifestJson))
+    fun `a legitimate id succeeds against a path-carrying baseUrl`() = runTest {
+        val mirror = Ollama(queue.client, baseUrl = "http://hub.test/hf")
+        queue.enqueue(basicManifestJson)
 
-        val result = runBlocking { mirror.manifest("qwen2.5:0.5b") }
+        val result = mirror.manifest("qwen2.5:0.5b")
 
         assertTrue(result.isSuccess)
         assertEquals(
             "/hf/v2/library/qwen2.5/manifests/0.5b",
-            server.takeRequest().path,
+            queue.requests[0].url.encodedPath,
         )
     }
 
     /** The namespace check must still catch an actual escape when baseUrl itself carries a path. */
     @Test
-    fun `a repo id that traverses out of the registry namespace is still refused against a path-carrying baseUrl`() {
-        val mirror = Ollama(OkHttpClient(), baseUrl = server.url("/hf").toString().trimEnd('/'))
+    fun `a repo id that traverses out of the registry namespace is still refused against a path-carrying baseUrl`() =
+        runTest {
+            val mirror = Ollama(queue.client, baseUrl = "http://hub.test/hf")
 
-        val result = runBlocking { mirror.manifest("../../etc/passwd") }
+            val result = mirror.manifest("../../etc/passwd")
 
-        assertTrue(result.isFailure)
-        assertEquals(0, server.requestCount)
-    }
+            assertTrue(result.isFailure)
+            assertEquals(0, queue.requests.size)
+        }
 
     @Test
-    fun `an http error is returned as a failure`() {
-        server.enqueue(MockResponse().setResponseCode(404))
+    fun `an http error is returned as a failure`() = runTest {
+        queue.enqueue(status = HttpStatusCode.NotFound)
 
-        val result = runBlocking { repo.manifest("nope:latest") }
+        val result = repo.manifest("nope:latest")
 
         assertTrue(result.isFailure)
     }
 
     /** "an OCI registry can also return a structured error body" - surfaced when present. */
     @Test
-    fun `an http error with an oci structured error body surfaces the message`() {
-        server.enqueue(
-            MockResponse().setResponseCode(404).setBody(
-                """{ "errors": [ { "code": "MANIFEST_UNKNOWN", "message": "manifest unknown" } ] }""",
-            ),
+    fun `an http error with an oci structured error body surfaces the message`() = runTest {
+        queue.enqueue(
+            body = """{ "errors": [ { "code": "MANIFEST_UNKNOWN", "message": "manifest unknown" } ] }""",
+            status = HttpStatusCode.NotFound,
         )
 
-        val result = runBlocking { repo.manifest("nope:latest") }
+        val result = repo.manifest("nope:latest")
 
         assertTrue(result.isFailure)
         assertTrue(result.exceptionOrNull()?.message.orEmpty().contains("manifest unknown"))
     }
 
     @Test
-    fun `malformed json is returned as a failure, not thrown`() {
-        server.enqueue(MockResponse().setBody("not json at all"))
+    fun `malformed json is returned as a failure, not thrown`() = runTest {
+        queue.enqueue("not json at all")
 
-        val result = runBlocking { repo.manifest("any:latest") }
+        val result = repo.manifest("any:latest")
 
         assertTrue(result.isFailure)
     }
 
     /** schemaVersion, mediaType and config are all in the fixture and unknown to ManifestResponse. */
     @Test
-    fun `unknown fields do not break parsing`() {
-        server.enqueue(MockResponse().setBody(basicManifestJson))
+    fun `unknown fields do not break parsing`() = runTest {
+        queue.enqueue(basicManifestJson)
 
-        assertTrue(runBlocking { repo.manifest("any:latest") }.isSuccess)
+        assertTrue(repo.manifest("any:latest").isSuccess)
     }
 
     /**
@@ -380,17 +377,15 @@ class OllamaTest {
      * algorithm must fail loudly rather than have its hex silently treated as one.
      */
     @Test
-    fun `a layer digest that is not sha256 fails the manifest`() {
-        server.enqueue(
-            MockResponse().setBody(
-                """{ "layers": [
-                    { "mediaType": "application/vnd.ollama.image.model", "size": 5,
-                      "digest": "sha512:deadbeef" }
-                ] }""",
-            ),
+    fun `a layer digest that is not sha256 fails the manifest`() = runTest {
+        queue.enqueue(
+            """{ "layers": [
+                { "mediaType": "application/vnd.ollama.image.model", "size": 5,
+                  "digest": "sha512:deadbeef" }
+            ] }""",
         )
 
-        val result = runBlocking { repo.manifest("weird:latest") }
+        val result = repo.manifest("weird:latest")
 
         assertTrue(result.isFailure)
     }
@@ -400,26 +395,24 @@ class OllamaTest {
      * characters, or it lands unvalidated in RemoteFile.path and RemoteFile.sha256 both.
      */
     @Test
-    fun `a layer digest with the sha256 prefix but malformed hex fails the manifest`() {
-        server.enqueue(
-            MockResponse().setBody(
-                """{ "layers": [
-                    { "mediaType": "application/vnd.ollama.image.model", "size": 5,
-                      "digest": "sha256:not-valid-hex" }
-                ] }""",
-            ),
+    fun `a layer digest with the sha256 prefix but malformed hex fails the manifest`() = runTest {
+        queue.enqueue(
+            """{ "layers": [
+                { "mediaType": "application/vnd.ollama.image.model", "size": 5,
+                  "digest": "sha256:not-valid-hex" }
+            ] }""",
         )
 
-        val result = runBlocking { repo.manifest("weird:latest") }
+        val result = repo.manifest("weird:latest")
 
         assertTrue(result.isFailure)
     }
 
     @Test
-    fun `an invalid baseUrl is returned as a failure, not thrown`() {
-        val invalidRepo = Ollama(OkHttpClient(), baseUrl = "registry.ollama.ai")
+    fun `an invalid baseUrl is returned as a failure, not thrown`() = runTest {
+        val invalidRepo = Ollama(queue.client, baseUrl = "registry.ollama.ai")
 
-        val result = runBlocking { invalidRepo.manifest("any:latest") }
+        val result = invalidRepo.manifest("any:latest")
 
         assertTrue(result.isFailure)
     }

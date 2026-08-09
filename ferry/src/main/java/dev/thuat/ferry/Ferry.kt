@@ -2,7 +2,6 @@ package dev.thuat.ferry
 
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
-import okhttp3.OkHttpClient
 
 /**
  * Entry point.
@@ -16,37 +15,28 @@ import okhttp3.OkHttpClient
  */
 object Ferry {
 
-    /**
-     * Temporary bridge so [ResumableDownloader]'s Ktor [HttpClient] runs over the same OkHttp
-     * client and interceptors a host handed to these factories — the property EmbeddabilityTest
-     * exists to guarantee. Disappears once the hub adapters themselves move to Ktor (Task 5) and
-     * these factories take an `HttpClient` directly (Task 6).
-     */
-    private fun bridgeClient(client: OkHttpClient): HttpClient =
-        HttpClient(OkHttp) { engine { preconfigured = client } }
-
     fun huggingFace(
-        client: OkHttpClient = OkHttpClient(),
+        client: HttpClient = HttpClient(OkHttp),
         baseUrl: String = "https://huggingface.co",
     ): RepoDownloader = RepoDownloader(
         repo = HuggingFace(client = client, baseUrl = baseUrl),
-        downloader = ResumableDownloader(bridgeClient(client)),
+        downloader = ResumableDownloader(client),
     )
 
     fun modelScope(
-        client: OkHttpClient = OkHttpClient(),
+        client: HttpClient = HttpClient(OkHttp),
         baseUrl: String = "https://modelscope.cn",
         revision: String = "master",
     ): RepoDownloader = RepoDownloader(
         repo = ModelScope(client = client, baseUrl = baseUrl, revision = revision),
-        downloader = ResumableDownloader(bridgeClient(client)),
+        downloader = ResumableDownloader(client),
     )
 
     fun ollama(
-        client: OkHttpClient = OkHttpClient(),
+        client: HttpClient = HttpClient(OkHttp),
         baseUrl: String = "https://registry.ollama.ai",
     ): RepoDownloader = RepoDownloader(
         repo = Ollama(client = client, baseUrl = baseUrl),
-        downloader = ResumableDownloader(bridgeClient(client)),
+        downloader = ResumableDownloader(client),
     )
 }

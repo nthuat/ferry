@@ -1,5 +1,7 @@
 package dev.thuat.ferry
 
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.okhttp.OkHttp
 import kotlinx.coroutines.runBlocking
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -73,7 +75,12 @@ class EmbeddabilityTest {
         server.enqueue(MockResponse().setBody(configBody))
 
         val ferry = Ferry.huggingFace(
-            client = hostClient,
+            // Ferry's factories take an HttpClient now (Task 5); this test's whole point is that a
+            // host's own OkHttpClient — interceptors included — is the one every request travels
+            // through, so it stays OkHttp-typed above and is wrapped here rather than switched to a
+            // plain Ktor client that would lose the interceptor. Task 6 gives Ferry a real
+            // OkHttpClient-friendly entry point; this bridge is a minimal compile fix, not that.
+            client = HttpClient(OkHttp) { engine { preconfigured = hostClient } },
             baseUrl = server.url("/").toString().trimEnd('/'),
         )
         runBlocking { ferry.download("Qwen/Q-0.5B", temp.root.toOkioPath()) }
@@ -102,7 +109,12 @@ class EmbeddabilityTest {
         server.enqueue(MockResponse().setBody(configBody))
 
         val ferry = Ferry.modelScope(
-            client = hostClient,
+            // Ferry's factories take an HttpClient now (Task 5); this test's whole point is that a
+            // host's own OkHttpClient — interceptors included — is the one every request travels
+            // through, so it stays OkHttp-typed above and is wrapped here rather than switched to a
+            // plain Ktor client that would lose the interceptor. Task 6 gives Ferry a real
+            // OkHttpClient-friendly entry point; this bridge is a minimal compile fix, not that.
+            client = HttpClient(OkHttp) { engine { preconfigured = hostClient } },
             baseUrl = server.url("/").toString().trimEnd('/'),
         )
         runBlocking { ferry.download("owner/model", temp.root.toOkioPath()) }
@@ -131,7 +143,12 @@ class EmbeddabilityTest {
         server.enqueue(MockResponse().setBody(configBody))
 
         val ferry = Ferry.ollama(
-            client = hostClient,
+            // Ferry's factories take an HttpClient now (Task 5); this test's whole point is that a
+            // host's own OkHttpClient — interceptors included — is the one every request travels
+            // through, so it stays OkHttp-typed above and is wrapped here rather than switched to a
+            // plain Ktor client that would lose the interceptor. Task 6 gives Ferry a real
+            // OkHttpClient-friendly entry point; this bridge is a minimal compile fix, not that.
+            client = HttpClient(OkHttp) { engine { preconfigured = hostClient } },
             baseUrl = server.url("/").toString().trimEnd('/'),
         )
         runBlocking { ferry.download("qwen2.5:0.5b", temp.root.toOkioPath()) }
