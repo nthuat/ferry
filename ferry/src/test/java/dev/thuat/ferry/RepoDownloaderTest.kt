@@ -576,6 +576,17 @@ class RepoDownloaderTest {
      * a clean install looks like) would otherwise refuse every model, permanently, regardless of how
      * much space is actually free. `into` is deliberately left uncreated here — that absence is
      * exactly the condition this test must not have masked.
+     *
+     * Under `FakeFileSystem` this does not exercise the nearest-*fake*-ancestor walk it would against
+     * a real `File`: `DefaultFreeSpaceProbe` is hardcoded to `FileSystem.SYSTEM` (see its own doc in
+     * `SpaceCheck.kt`), which cannot see any directory this test creates on `fs`. Its ancestor walk
+     * therefore climbs straight past `into`, `parent` and `root` — none of which exist on the real
+     * host filesystem — and lands on the real `/`, reading *that* volume's free space. This test
+     * still proves something real end to end: `SpaceCheck()`'s default probe resolves to an actual,
+     * positive figure for a path that does not exist rather than the phantom zero `File.usableSpace`
+     * would report directly, so the download is not refused. It does not prove the walk stops at the
+     * *nearest* ancestor specifically — `SpaceCheckTest` covers that choice directly, against real
+     * `File.usableSpace` calls it can actually observe.
      */
     @Test
     fun `a download into a directory that does not exist yet still succeeds when space is real`() {
@@ -604,6 +615,12 @@ class RepoDownloaderTest {
      * that does not exist yet — using the real default probe end to end, not a custom one. This test
      * instead proves the guarantee survives end to end: a requirement no real disk could ever satisfy
      * still refuses, deterministically, on any machine.
+     *
+     * Same `FakeFileSystem` caveat as the sibling test above: `DefaultFreeSpaceProbe`'s ancestor walk
+     * cannot see `into`/`parent`/`root` on `fs` and lands on the real host `/`, so this measures the
+     * real root volume's free space, not the nearest `fs`-created ancestor. `Long.MAX_VALUE / 2` is
+     * chosen so the assertion holds regardless of exactly which real ancestor answers — no volume on
+     * any real machine is that large.
      */
     @Test
     fun `a download into a directory that does not exist yet still refuses when the repo cannot possibly fit`() {
@@ -996,6 +1013,53 @@ class RepoDownloaderTest {
 
         assertTrue(result.isFailure)
         assertEquals(0, queue.requests.size, "must not spend the user's data before validating the path")
+    }
+
+    /**
+     * `parent / "/abs"` in okio drops `parent` entirely and returns the absolute path alone. A repo
+     * id that is itself an absolute path must still be refused, not resolved as though it had been
+     * safely joined to `into`. `download()` happens to have defense in depth here — `stagingDir`,
+     * `target` and `markerDir` are each checked against a *different* reserved root (`into/.staging`,
+     * `into`, `into/.ferry`), and no single absolute string can lexically fall inside all three at
+     * once — so this pin holds regardless of which check catches it; see the `abandonStaging` sibling
+     * below for the test that isolates `resolveInside`'s own `relative.startsWith("/")` guard
+     * specifically, on the one call site that checks against a single root.
+     */
+    @Test
+    fun `a repo id that is an absolute path is refused rather than resolved against root`() {
+        val files = listOf(remote("config.json", configBody.length.toLong()))
+        val absoluteRepoId = "$root/evil"
+
+        val result = await { downloaderFor(files).download(absoluteRepoId, root) }
+
+        assertTrue(result.isFailure)
+        assertEquals(0, queue.requests.size, "must not spend the user's data before validating the path")
+    }
+
+    /**
+     * `abandonStaging` resolves its repo id against exactly one root (`into/.staging`), so unlike
+     * `download()` there is no second, differently-rooted check to fall back on — this is the test
+     * that actually isolates `resolveInside`'s `relative.startsWith("/")` guard.
+     *
+     * The absolute string "$root/.staging/evil" is deliberately chosen to alias the *same* staging
+     * path the ordinary repo id "evil" resolves to (`into/.staging/evil.d`): without the guard,
+     * `parent / relative` drops `parent` and returns the absolute path unchanged, which still lies
+     * lexically inside `into/.staging` and so passes the "strictly inside" check — letting an
+     * absolute-looking repo id delete a *different*, legitimate repo's own in-flight staging.
+     */
+    @Test
+    fun `abandonStaging refuses a repo id that is an absolute path rather than aliasing another repo's staging`() {
+        val legitimateStaging = root / ".staging/evil.d/model.bin.part"
+        writeText(legitimateStaging, "legitimate in-flight bytes staged under the ordinary repo id 'evil'")
+        val absoluteRepoId = "$root/.staging/evil"
+
+        val result = await { downloaderFor(emptyList()).abandonStaging(absoluteRepoId, root) }
+
+        assertTrue(result.isFailure)
+        assertTrue(
+            fs.exists(legitimateStaging),
+            "an absolute-path repo id must not alias, and delete, another repo's own staging directory",
+        )
     }
 
     /**

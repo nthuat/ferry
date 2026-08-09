@@ -782,7 +782,7 @@ class RepoDownloader(
                     relativePath.removeSuffix(".part") in declaredPaths ||
                     relativePath.removeSuffix(".validator") in declaredPaths
                 if (!vouchedFor) {
-                    fileSystem.delete(resolveInside(stagingDir, relativePath))
+                    fileSystem.delete(resolveInside(stagingDir, relativePath), mustExist = false)
                 }
             }
         fileSystem.listRecursively(stagingDir).toList().asReversed()

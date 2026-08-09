@@ -340,7 +340,7 @@ the namespace, not a same-namespace collision. Not treated as a gap worth closin
 reachable, and exactly as consequential, as a caller or hub directly supplying that reconstructed value
 in the first place.
 
-### `resolveInside` on Okio: lexical normalization, not canonicalization
+## `resolveInside` on Okio: lexical normalization, not canonicalization
 
 The Kotlin Multiplatform port of `RepoDownloader` (`ferry`'s Task 4) moved `resolveInside` off
 `java.io.File.canonicalPath` onto `okio.Path.normalized()`. Okio can only canonicalize a path that
@@ -350,9 +350,16 @@ was never available as a like-for-like replacement.
 
 `.normalized()` resolves `".."` and redundant separators exactly the way `canonicalPath` did, so every
 `resolveInside` test in `RepoDownloaderTest` — including the escape, collision, and reserved-namespace
-cases above — still passes unchanged. What normalization does *not* do, and canonicalization did, is
-resolve a symlink before the strictly-inside comparison: a symlink planted inside `parent` that points
-outside it is no longer caught here.
+cases in the `..` entry above — still passes unchanged. `resolveInside` also gained an explicit
+`relative.startsWith("/")` guard as part of the same port: `parent / "/abs"` in okio drops `parent`
+entirely and returns the absolute path alone, which could otherwise happen to sit lexically inside
+`root` and pass the `startsWith("$root/")` check — `RepoDownloaderTest`'s
+`a repo id that is an absolute path is refused rather than resolved against root` (and its
+`abandonStaging` sibling) pin this closed.
+
+What normalization does *not* do, and canonicalization did, is resolve a symlink before the
+strictly-inside comparison: a symlink planted inside `parent` that points outside it is no longer
+caught here.
 
 **Accepted, not fixed, for the same reason the `..` residual above is accepted.** Reaching this gap
 requires something that can already create a symlink inside a Ferry-managed tree — `into`, its
@@ -361,6 +368,8 @@ app-private location the host app already fully controls. Anything with write ac
 already write, delete, or replace real content directly; using a symlink to redirect a subsequent
 `resolveInside` call buys it nothing it did not already have. No `RepoDownloaderTest` case plants a
 symlink for this reason: the residual is the same shape as `..`-cancellation above, not a new one.
+
+## Free space is probed at the nearest existing ancestor, not the directory asked about
 
 `DefaultFreeSpaceProbe` (`SpaceCheck`'s default `FreeSpaceProbe`) may be asked about a directory
 that does not exist yet — `RepoDownloader.download()`'s `into` before a first-ever download, or any
