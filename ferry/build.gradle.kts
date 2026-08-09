@@ -58,10 +58,14 @@ dependencies {
     api("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
     // Stays implementation: serialization appears in no public signature, only inside HuggingFace.
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    // api, not implementation: okio.Path enters public signatures in Task 2.
+    api("com.squareup.okio:okio:3.9.1")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    testImplementation(kotlin("test"))
+    testImplementation("com.squareup.okio:okio-fakefilesystem:3.9.1")
 }
 
 /**

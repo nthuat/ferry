@@ -4,6 +4,8 @@ import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okio.FileSystem
+import okio.Path.Companion.toOkioPath
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -59,7 +61,7 @@ class RepoDownloaderTest {
     )
 
     private fun shaOf(content: String): String =
-        Sha256.of(temp.newFile().apply { writeText(content) })
+        Sha256.of(FileSystem.SYSTEM, temp.newFile().apply { writeText(content) }.toOkioPath())
 
     @Test
     fun `downloads every file and commits the directory`() {

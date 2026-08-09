@@ -4,6 +4,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okio.FileSystem
+import okio.Path.Companion.toOkioPath
 import java.io.File
 import java.io.IOException
 
@@ -353,7 +355,7 @@ class RepoDownloader(
 
                 // A null sha256 means the hub published none; the size check above is then the only
                 // acceptance test, which is weaker and unavoidable.
-                if (remote.sha256 != null && !Sha256.matches(destination, remote.sha256)) {
+                if (remote.sha256 != null && !Sha256.matches(FileSystem.SYSTEM, destination.toOkioPath(), remote.sha256)) {
                     return@withContext Result.failure(
                         VerificationException(remote.path, "sha256 mismatch"),
                     )
@@ -658,7 +660,7 @@ class RepoDownloader(
         val onDisk = resolveInside(dir, path)
         return onDisk.isFile &&
             onDisk.length() == sizeBytes &&
-            (sha256 == null || Sha256.matches(onDisk, sha256))
+            (sha256 == null || Sha256.matches(FileSystem.SYSTEM, onDisk.toOkioPath(), sha256))
     }
 
     /**
