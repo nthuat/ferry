@@ -309,7 +309,7 @@ class RepoDownloader(
 
                 downloader.download(
                     url = remote.url,
-                    target = destination,
+                    target = destination.toOkioPath(),
                 ) { written, _ ->
                     onProgress(
                         RepoProgress.Downloading(

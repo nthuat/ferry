@@ -60,12 +60,17 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
     // api, not implementation: okio.Path enters public signatures in Task 2.
     api("com.squareup.okio:okio:3.9.1")
+    // api, not implementation: HttpClient enters ResumableDownloader's public constructor here.
+    api("io.ktor:ktor-client-core:3.2.3")
+    // JVM engine; moves to jvmMain in Task 7.
+    api("io.ktor:ktor-client-okhttp:3.2.3")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation(kotlin("test"))
     testImplementation("com.squareup.okio:okio-fakefilesystem:3.9.1")
+    testImplementation("io.ktor:ktor-client-mock:3.2.3")
 }
 
 /**

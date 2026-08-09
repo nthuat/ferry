@@ -1,5 +1,7 @@
 package dev.thuat.ferry
 
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.okhttp.OkHttp
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
@@ -43,6 +45,14 @@ class RepoDownloaderTest {
             Result.success(RepoManifest(repoId, files))
     }
 
+    /**
+     * Temporary bridge, same shape as `Ferry.bridgeClient`: `ResumableDownloader` now takes a Ktor
+     * `HttpClient`, but this file still drives everything through `MockWebServer` + `OkHttpClient`.
+     * Task 4 replaces this file's whole construction with `ResumableDownloader(queue.client, fs)`.
+     */
+    private fun bridgeDownloader(client: OkHttpClient = OkHttpClient()): ResumableDownloader =
+        ResumableDownloader(HttpClient(OkHttp) { engine { preconfigured = client } })
+
     /** Builds a RemoteFile pointing at this test's server. */
     private fun remote(path: String, size: Long, sha256: String? = null) = RemoteFile(
         path = path,
@@ -56,7 +66,7 @@ class RepoDownloaderTest {
         freeBytes: Long = Long.MAX_VALUE,
     ) = RepoDownloader(
         repo = fakeRepo(files),
-        downloader = ResumableDownloader(OkHttpClient()),
+        downloader = bridgeDownloader(),
         spaceCheck = SpaceCheck(probe = { freeBytes }, headroomBytes = 0L),
     )
 
@@ -146,7 +156,7 @@ class RepoDownloaderTest {
         // Room for the two remaining bytes, nowhere near room for all ten.
         val downloader = RepoDownloader(
             repo = fakeRepo(files),
-            downloader = ResumableDownloader(OkHttpClient()),
+            downloader = bridgeDownloader(),
             spaceCheck = SpaceCheck(probe = { 4 }, headroomBytes = 0L),
         )
 
@@ -176,7 +186,7 @@ class RepoDownloaderTest {
         // credited.
         val downloader = RepoDownloader(
             repo = fakeRepo(files),
-            downloader = ResumableDownloader(OkHttpClient()),
+            downloader = bridgeDownloader(),
             spaceCheck = SpaceCheck(probe = { 4 }, headroomBytes = 0L),
         )
 
@@ -305,7 +315,7 @@ class RepoDownloaderTest {
             override suspend fun manifest(repoId: String): Result<RepoManifest> =
                 throw IllegalStateException("hub blew up")
         }
-        val downloader = RepoDownloader(repo = throwingHub, downloader = ResumableDownloader(OkHttpClient()))
+        val downloader = RepoDownloader(repo = throwingHub, downloader = bridgeDownloader())
 
         val result = runBlocking { downloader.download("a/b", temp.root) }
 
@@ -320,7 +330,7 @@ class RepoDownloaderTest {
         val failingHub = object : ModelHub {
             override suspend fun manifest(repoId: String): Result<RepoManifest> = Result.failure(boom)
         }
-        val downloader = RepoDownloader(repo = failingHub, downloader = ResumableDownloader(OkHttpClient()))
+        val downloader = RepoDownloader(repo = failingHub, downloader = bridgeDownloader())
 
         val result = runBlocking { downloader.download("a/b", temp.root) }
 
@@ -549,7 +559,7 @@ class RepoDownloaderTest {
         server.enqueue(MockResponse().setBody(weightsBody))
         // The real default SpaceCheck() — backed by the real File.usableSpace — not downloaderFor's
         // fake lambda probe, which ignores its `dir` argument and so cannot observe this bug either way.
-        val fresh = RepoDownloader(repo = fakeRepo(files), downloader = ResumableDownloader(OkHttpClient()))
+        val fresh = RepoDownloader(repo = fakeRepo(files), downloader = bridgeDownloader())
 
         val result = runBlocking { fresh.download("a/b", into) }
 
@@ -570,7 +580,7 @@ class RepoDownloaderTest {
     fun `a download into a directory that does not exist yet still refuses when the repo cannot possibly fit`() {
         val into = File(temp.newFolder("parent"), "fresh-install")
         val files = listOf(remote("model.bin", Long.MAX_VALUE / 2))
-        val impossible = RepoDownloader(repo = fakeRepo(files), downloader = ResumableDownloader(OkHttpClient()))
+        val impossible = RepoDownloader(repo = fakeRepo(files), downloader = bridgeDownloader())
 
         val result = runBlocking { impossible.download("a/b", into) }
 
@@ -871,7 +881,7 @@ class RepoDownloaderTest {
         )
         val downloader = RepoDownloader(
             repo = hf,
-            downloader = ResumableDownloader(OkHttpClient()),
+            downloader = bridgeDownloader(),
             spaceCheck = SpaceCheck(probe = { Long.MAX_VALUE }, headroomBytes = 0L),
         )
 

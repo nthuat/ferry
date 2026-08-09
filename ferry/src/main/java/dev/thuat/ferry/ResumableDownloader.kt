@@ -1,16 +1,24 @@
 package dev.thuat.ferry
 
+import io.ktor.client.HttpClient
+import io.ktor.client.plugins.expectSuccess
+import io.ktor.client.request.header
+import io.ktor.client.request.prepareGet
+import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsChannel
+import io.ktor.http.HttpHeaders
+import io.ktor.http.URLParserException
+import io.ktor.http.contentLength
+import io.ktor.http.isSuccess
+import io.ktor.utils.io.ByteReadChannel
+import io.ktor.utils.io.readAvailable
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import java.io.File
-import java.io.FileOutputStream
-import java.io.IOException
+import okio.FileSystem
+import okio.IOException
+import okio.Path
 
 /**
  * Resumable download over HTTP range requests.
@@ -30,7 +38,8 @@ import java.io.IOException
  *   Content-Range: bytes 1024-4095/4096   server confirms what it actually sent
  */
 class ResumableDownloader(
-    private val client: OkHttpClient,
+    private val client: HttpClient,
+    private val fileSystem: FileSystem = FileSystem.SYSTEM,
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
 
@@ -42,114 +51,100 @@ class ResumableDownloader(
      */
     suspend fun download(
         url: String,
-        target: File,
+        target: Path,
         onProgress: (bytesWritten: Long, totalBytes: Long?) -> Unit = { _, _ -> },
-    ): Result<File> = withContext(dispatcher) {
-        val part = File(target.parentFile, "${target.name}.part")
-        val validatorFile = File(target.parentFile, "${target.name}.validator")
+    ): Result<Path> = withContext(dispatcher) {
+        val parent = target.parent
+            ?: return@withContext Result.failure(IOException("target has no parent directory: $target"))
+        val part = parent / "${target.name}.part"
+        val validatorFile = parent / "${target.name}.validator"
 
         try {
-            target.parentFile?.mkdirs()
-            val haveBytes = if (part.exists()) part.length() else 0L
-            val validator = validatorFile.takeIf { it.exists() && haveBytes > 0 }?.readText()
+            fileSystem.createDirectories(parent)
+            val haveBytes = fileSystem.metadataOrNull(part)?.size ?: 0L
+            val validator = if (haveBytes > 0 && fileSystem.exists(validatorFile)) {
+                fileSystem.read(validatorFile) { readUtf8() }
+            } else null
 
-            // No validator means no way to ask "is this still the file I started?". The server
-            // would answer 206 and hand back bytes from whatever it holds now, which we would
-            // append to a stale prefix. Re-downloading is cheap; silent corruption is not.
+            // No validator means no way to ask "is this still the file I started?" — restart.
             val resumeFrom = if (validator != null) haveBytes else 0L
 
-            client.newCall(rangeRequest(url, resumeFrom, validator)).execute().use { response ->
-                if (!response.isSuccessful) {
-                    return@withContext Result.failure(IOException("HTTP ${response.code} for $url"))
+            client.prepareGet(url) {
+                expectSuccess = false
+                // Ranges are offsets into the *encoded* representation; identity keeps disk and
+                // protocol talking about the same bytes. (The OkHttp engine would otherwise add
+                // transparent gzip exactly like bare OkHttp did.)
+                header(HttpHeaders.AcceptEncoding, "identity")
+                if (resumeFrom > 0) {
+                    header(HttpHeaders.Range, "bytes=$resumeFrom-")
+                    validator?.let { header(HttpHeaders.IfRange, it) }
+                }
+            }.execute { response ->
+                if (!response.status.isSuccess()) {
+                    return@execute Result.failure(
+                        IOException("HTTP ${response.status.value} for $url"),
+                    )
                 }
 
-                // The bug this whole class exists to avoid: we asked for a range and the server
-                // sent the whole file instead — either it ignores Range, or If-Range failed
-                // because the file changed. Appending here splices two different files together
-                // and produces a plausible-sized, permanently corrupt result.
                 val append = response.continuesFrom(resumeFrom)
                 val startFrom = if (append) resumeFrom else 0L
 
-                response.validator()?.let { validatorFile.writeText(it) }
+                response.validator()?.let { v ->
+                    fileSystem.write(validatorFile) { writeUtf8(v) }
+                }
 
                 val total = totalBytes(response, startFrom)
-                val written = writeBody(response, part, append, startFrom, total, onProgress)
+                val written =
+                    writeBody(response.bodyAsChannel(), part, append, total, onProgress)
 
                 if (total != null && written != total) {
-                    return@withContext Result.failure(
+                    return@execute Result.failure(
                         IOException("incomplete: wrote $written of $total bytes"),
                     )
                 }
 
-                if (target.exists() && !target.delete()) {
-                    return@withContext Result.failure(IOException("cannot replace ${target.name}"))
-                }
-                if (!part.renameTo(target)) {
-                    return@withContext Result.failure(IOException("cannot finalise ${target.name}"))
-                }
-                validatorFile.delete()
+                fileSystem.delete(target, mustExist = false)
+                fileSystem.atomicMove(part, target)
+                fileSystem.delete(validatorFile, mustExist = false)
                 Result.success(target)
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: IOException) {
             // The .part file is deliberately left behind — it is the resume point.
             Result.failure(e)
-        } catch (e: IllegalArgumentException) {
-            // Request.Builder.url throws this, not IOException, for a malformed URL. ModelHub is a
-            // public interface, so RemoteFile.url can come from a third-party adapter and reach here
-            // as anything at all — and nothing may throw across this boundary.
+        } catch (e: URLParserException) {
             Result.failure(IOException("invalid url: $url", e))
+        } catch (e: Exception) {
+            // Engine-specific network failures (Darwin does not throw java.io types). Same
+            // normalisation RepoDownloader.asDownloadFailure applies at its own boundary.
+            Result.failure(IOException(e.message ?: e.toString(), e))
         }
     }
 
-    private fun rangeRequest(url: String, haveBytes: Long, validator: String?): Request =
-        Request.Builder()
-            .url(url)
-            // Ranges are offsets into the *encoded* representation. OkHttp adds Accept-Encoding:
-            // gzip whenever neither it nor Range is set, and transparently decompresses — so a
-            // first request would fill the .part file with decompressed bytes, and the resume
-            // offset computed from its length would index into a different byte stream entirely.
-            // Asking for identity on every request keeps disk and protocol talking about the same
-            // bytes. This is what MNN's ModelFileDownloader does, and the reason is easy to miss.
-            .header("Accept-Encoding", "identity")
-            .apply {
-                if (haveBytes > 0) {
-                    header("Range", "bytes=$haveBytes-")
-                    // Without If-Range, resuming a file that changed on the server splices the
-                    // tail of the new file onto the head of the old one. With it, the server
-                    // answers 200 and we start clean.
-                    validator?.let { header("If-Range", it) }
-                }
-            }
-            .build()
-
     private suspend fun writeBody(
-        response: Response,
-        part: File,
+        body: ByteReadChannel,
+        part: Path,
         append: Boolean,
-        startFrom: Long,
         total: Long?,
         onProgress: (Long, Long?) -> Unit,
     ): Long {
-        val body = response.body ?: throw IOException("empty body")
-        var written = startFrom
-
-        FileOutputStream(part, append).use { out ->
-            body.byteStream().use { input ->
-                val buffer = ByteArray(BUFFER_BYTES)
-                while (true) {
-                    // Cancellation has to be checked by hand: a blocking read is not suspending,
-                    // so cancelling the coroutine would otherwise not stop the transfer.
-                    currentCoroutineContext().ensureActive()
-                    val read = input.read(buffer)
-                    if (read == -1) break
-                    out.write(buffer, 0, read)
-                    written += read
-                    onProgress(written, total)
-                }
-                out.fd.sync()
+        fileSystem.openReadWrite(part).use { handle ->
+            if (!append) handle.resize(0L)
+            var position = handle.size()
+            val buffer = ByteArray(BUFFER_BYTES)
+            while (true) {
+                // readAvailable is a suspending, cancellable read — the by-hand ensureActive()
+                // the blocking OkHttp stream needed is now the channel's own job.
+                val read = body.readAvailable(buffer, 0, buffer.size)
+                if (read == -1) break
+                handle.write(position, buffer, 0, read)
+                position += read
+                onProgress(position, total)
             }
+            handle.flush()
+            return position
         }
-        return written
     }
 
     /**
@@ -159,17 +154,17 @@ class ResumableDownloader(
      * describe the slice just sent. A server is also allowed to put an asterisk after that slash
      * when it genuinely doesn't know the total, which is why this is nullable rather than guessed.
      */
-    private fun totalBytes(response: Response, startFrom: Long): Long? {
-        response.header("Content-Range")?.let { header ->
+    private fun totalBytes(response: HttpResponse, startFrom: Long): Long? {
+        response.headers[HttpHeaders.ContentRange]?.let { header ->
             return header.substringAfterLast('/').trim().toLongOrNull()
         }
-        val length = response.body?.contentLength() ?: -1L
-        return if (length >= 0) startFrom + length else null
+        val length = response.contentLength() ?: return null
+        return startFrom + length
     }
 
     /** ETag is the strong validator; Last-Modified is the fallback for servers that omit it. */
-    private fun Response.validator(): String? =
-        header("ETag") ?: header("Last-Modified")
+    private fun HttpResponse.validator(): String? =
+        headers[HttpHeaders.ETag] ?: headers[HttpHeaders.LastModified]
 
     /**
      * Whether this response continues from [resumeFrom], or restarts the file.
@@ -185,10 +180,10 @@ class ResumableDownloader(
      * strict about the case that corrupts files while accepting the one that is merely
      * non-compliant.
      */
-    private fun Response.continuesFrom(resumeFrom: Long): Boolean {
-        if (code == HTTP_PARTIAL_CONTENT) return true
+    private fun HttpResponse.continuesFrom(resumeFrom: Long): Boolean {
+        if (status.value == HTTP_PARTIAL_CONTENT) return true
         if (resumeFrom <= 0L) return false
-        val start = header("Content-Range")
+        val start = headers[HttpHeaders.ContentRange]
             ?.substringAfter("bytes ")
             ?.substringBefore('-')
             ?.trim()
