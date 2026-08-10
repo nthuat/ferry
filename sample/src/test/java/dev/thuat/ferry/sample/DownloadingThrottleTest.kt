@@ -1,6 +1,7 @@
 package dev.thuat.ferry.sample
 
 import dev.thuat.ferry.RepoProgress
+import okio.Path.Companion.toPath
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -64,7 +65,7 @@ class DownloadingThrottleTest {
         assertTrue(throttle.shouldEmit(RepoProgress.CheckingSpace("owner/model")))
         assertTrue(throttle.shouldEmit(RepoProgress.Verifying("owner/model", "model.safetensors")))
         assertTrue(
-            throttle.shouldEmit(RepoProgress.Complete("owner/model", java.io.File("/tmp/owner/model"))),
+            throttle.shouldEmit(RepoProgress.Complete("owner/model", "/tmp/owner/model".toPath())),
         )
     }
 }

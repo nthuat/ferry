@@ -3,11 +3,11 @@ package dev.thuat.ferry.sample
 import dev.thuat.ferry.InsufficientSpaceException
 import dev.thuat.ferry.RepoProgress
 import dev.thuat.ferry.SpaceReport
+import okio.Path.Companion.toPath
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.io.File
 import java.io.IOException
 
 /**
@@ -89,12 +89,12 @@ class ProgressMappingTest {
         assertTrue(skipped.marksRealAttempt)
         assertFalse(RepoProgress.CheckingSpace("owner/model").marksRealAttempt)
         assertFalse(RepoProgress.Verifying("owner/model", "config.json").marksRealAttempt)
-        assertFalse(RepoProgress.Complete("owner/model", File("/tmp/owner/model")).marksRealAttempt)
+        assertFalse(RepoProgress.Complete("owner/model", "/tmp/owner/model".toPath()).marksRealAttempt)
     }
 
     @Test
     fun `complete after a real transfer is not a cache hit`() {
-        val progress = RepoProgress.Complete("owner/model", File("/tmp/owner/model"))
+        val progress = RepoProgress.Complete("owner/model", "/tmp/owner/model".toPath())
 
         val state = progress.toDownloadState(sawTransfer = true)
 
@@ -103,7 +103,7 @@ class ProgressMappingTest {
 
     @Test
     fun `complete with no prior downloading event is a cache hit`() {
-        val progress = RepoProgress.Complete("owner/model", File("/tmp/owner/model"))
+        val progress = RepoProgress.Complete("owner/model", "/tmp/owner/model".toPath())
 
         val state = progress.toDownloadState(sawTransfer = false)
 
@@ -112,7 +112,7 @@ class ProgressMappingTest {
 
     @Test
     fun `complete after a real transfer carries the live file count from the last downloading event`() {
-        val progress = RepoProgress.Complete("owner/model", File("/tmp/owner/model"))
+        val progress = RepoProgress.Complete("owner/model", "/tmp/owner/model".toPath())
 
         val state = progress.toDownloadState(sawTransfer = true, lastFileCount = 9)
 
@@ -125,7 +125,7 @@ class ProgressMappingTest {
         // count available for it — passing one anyway (a stale value left over from a previous
         // attempt, say) must not leak into the row, or the row would show a number Ferry never
         // actually reported for this outcome.
-        val progress = RepoProgress.Complete("owner/model", File("/tmp/owner/model"))
+        val progress = RepoProgress.Complete("owner/model", "/tmp/owner/model".toPath())
 
         val state = progress.toDownloadState(sawTransfer = false, lastFileCount = 9)
 

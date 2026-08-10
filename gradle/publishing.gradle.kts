@@ -16,6 +16,8 @@
 
 import org.gradle.api.publish.PublishingExtension
 import org.gradle.api.publish.maven.MavenPublication
+import org.gradle.api.publish.maven.tasks.AbstractPublishToMaven
+import org.gradle.plugins.signing.Sign
 import org.gradle.plugins.signing.SigningExtension
 
 /**
@@ -83,5 +85,20 @@ if (signingKey != null && signingPassword != null) {
     extensions.configure<SigningExtension> {
         useInMemoryPgpKeys(signingKey, signingPassword)
         sign(extensions.getByType<PublishingExtension>().publications)
+    }
+
+    // :ferry attaches one shared javadoc jar to every per-target KMP publication (its own
+    // build.gradle.kts). Signing derives an artifact's .asc path from the artifact's filename alone,
+    // not from which publication asked for it, so two Sign tasks for two different publications can
+    // both claim to produce the exact same .asc file. Gradle's own task-output validation then fails
+    // a publish task for consuming a file with no producer it was told about — it has no way to know
+    // the two Sign tasks agree. Declaring every publish task dependent on every Sign task is the
+    // standard fix for this exact shared-artifact-in-a-multi-publication shape (tracked upstream at
+    // https://github.com/gradle/gradle/issues/26091): broader than strictly needed — a publish task
+    // now waits on signing for publications it does not itself consume — but correct, and the cost is
+    // paid only when signing is actually configured, which per secretOrNull's own doc is only for a
+    // real Maven Central release, never for a contributor's plain publishToMavenLocal.
+    tasks.withType<AbstractPublishToMaven>().configureEach {
+        dependsOn(tasks.withType<Sign>())
     }
 }

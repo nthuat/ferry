@@ -187,13 +187,13 @@ point of the marker. There is no API to clear it; the error message says to remo
 
 ## The `api` configuration is not regression-detectable from inside the module
 
-`OkHttpClient` and `CoroutineDispatcher` are on `api` so a consumer can pass its own client, which is
+`HttpClient` and `CoroutineDispatcher` are on `api` so a consumer can pass its own client, which is
 what `EmbeddabilityTest` exists to protect. That test compiles against module source and would pass
-under `implementation` too, so it cannot catch a regression. Proving it needs a consumer project
-built against the published artifact, and nothing is published yet.
+under `implementation` too, so it cannot catch a regression. Proving it needs a separate consumer
+project built against the published artifact, and no such project exists yet.
 
 **Cheap partial fix, done:** `checkEmbeddable` asserts that the `api` configuration's dependencies
-include okhttp and a module exporting `CoroutineDispatcher`.
+include Ktor's `HttpClient` and a module exporting `CoroutineDispatcher`.
 
 ## ModelScope's file listing may paginate above what has been tested
 
@@ -288,6 +288,14 @@ its per-file path travels through `addQueryParameter`, an opaque, percent-encode
 segment-popping semantics — confirmed empirically that the same malicious `path` round-trips there
 unchanged and `pathSegments` is unaffected.
 
+**Preserved across the Ktor port.** Both halves' defense above is described against OkHttp's
+`HttpUrl.Builder.addPathSegments`, the client this project shipped 0.1.0 with; the Kotlin
+Multiplatform port to Ktor carries the identical structural check forward on `URLBuilder` instead —
+`appendPathSegmentsResolvingDots` resolves `..` by popping the preceding segment the same way
+`addPathSegments` did (so `requireWithinNamespace` and the `resolve/main` prefix check still catch
+it), and `appendOpaqueSegment` keeps Ollama's `tag` segment literal exactly like OkHttp's singular
+`addPathSegment` did (see `KtorUrlCompat.kt`).
+
 **Relationship to `RepoDownloader.resolveInside`: dominance, not coincidence.** `resolveInside(stagingDir,
 remote.path)` already guards the *filesystem* destination built from the same `path`, before
 `downloader.download(url = remote.url, ...)` is called — so today, for a `path` of plain leading `..`
@@ -339,6 +347,35 @@ exact cancellation) is not distinguished from an ordinary one — this check onl
 the namespace, not a same-namespace collision. Not treated as a gap worth closing: it is exactly as
 reachable, and exactly as consequential, as a caller or hub directly supplying that reconstructed value
 in the first place.
+
+## `resolveInside` on Okio: lexical normalization, not canonicalization
+
+The Kotlin Multiplatform port of `RepoDownloader` (`ferry`'s Task 4) moved `resolveInside` off
+`java.io.File.canonicalPath` onto `okio.Path.normalized()`. Okio can only canonicalize a path that
+already exists, and most of what `resolveInside` guards — a staging directory, a not-yet-committed
+target, a repo id's own marker slot — does not exist yet at the point it is checked, so canonicalizing
+was never available as a like-for-like replacement.
+
+`.normalized()` resolves `".."` and redundant separators exactly the way `canonicalPath` did, so every
+`resolveInside` test in `RepoDownloaderTest` — including the escape, collision, and reserved-namespace
+cases in the `..` entry above — still passes unchanged. `resolveInside` also gained an explicit
+`relative.startsWith("/")` guard as part of the same port: `parent / "/abs"` in okio drops `parent`
+entirely and returns the absolute path alone, which could otherwise happen to sit lexically inside
+`root` and pass the `startsWith("$root/")` check — `RepoDownloaderTest`'s
+`a repo id that is an absolute path is refused rather than resolved against root` (and its
+`abandonStaging` sibling) pin this closed.
+
+What normalization does *not* do, and canonicalization did, is resolve a symlink before the
+strictly-inside comparison: a symlink planted inside `parent` that points outside it is no longer
+caught here.
+
+**Accepted, not fixed, for the same reason the `..` residual above is accepted.** Reaching this gap
+requires something that can already create a symlink inside a Ferry-managed tree — `into`, its
+`.staging`, or its `.ferry` shadow tree — all of which are directories Ferry itself created under an
+app-private location the host app already fully controls. Anything with write access there could
+already write, delete, or replace real content directly; using a symlink to redirect a subsequent
+`resolveInside` call buys it nothing it did not already have. No `RepoDownloaderTest` case plants a
+symlink for this reason: the residual is the same shape as `..`-cancellation above, not a new one.
 
 ## Free space is probed at the nearest existing ancestor, not the directory asked about
 

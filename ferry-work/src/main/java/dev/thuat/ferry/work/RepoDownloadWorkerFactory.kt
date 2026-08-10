@@ -12,7 +12,7 @@ import dev.thuat.ferry.RepoDownloader
  *
  * WorkManager's default worker factory instantiates workers by reflection on a
  * `(Context, WorkerParameters)` constructor. [RepoDownloadWorker] takes more than that —
- * [repoDownloader] wraps an `OkHttpClient` and a hub choice, [notifications] wraps a host's
+ * [repoDownloader] wraps a `HttpClient` and a hub choice, [notifications] wraps a host's
  * notification design — and neither can travel through [androidx.work.Data], which is primitives
  * only (see [RepoDownloadWorker]'s own KDoc). A [WorkerFactory] is WorkManager's own answer to
  * exactly this: register one, and it stands in for the default for every worker class it claims.
