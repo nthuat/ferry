@@ -189,8 +189,8 @@ point of the marker. There is no API to clear it; the error message says to remo
 
 `HttpClient` and `CoroutineDispatcher` are on `api` so a consumer can pass its own client, which is
 what `EmbeddabilityTest` exists to protect. That test compiles against module source and would pass
-under `implementation` too, so it cannot catch a regression. Proving it needs a consumer project
-built against the published artifact, and nothing is published yet.
+under `implementation` too, so it cannot catch a regression. Proving it needs a separate consumer
+project built against the published artifact, and no such project exists yet.
 
 **Cheap partial fix, done:** `checkEmbeddable` asserts that the `api` configuration's dependencies
 include Ktor's `HttpClient` and a module exporting `CoroutineDispatcher`.
@@ -287,6 +287,14 @@ pop), so in practice this check's entire effect is against `path`. `ModelScope` 
 its per-file path travels through `addQueryParameter`, an opaque, percent-encoded value with no
 segment-popping semantics — confirmed empirically that the same malicious `path` round-trips there
 unchanged and `pathSegments` is unaffected.
+
+**Preserved across the Ktor port.** Both halves' defense above is described against OkHttp's
+`HttpUrl.Builder.addPathSegments`, the client this project shipped 0.1.0 with; the Kotlin
+Multiplatform port to Ktor carries the identical structural check forward on `URLBuilder` instead —
+`appendPathSegmentsResolvingDots` resolves `..` by popping the preceding segment the same way
+`addPathSegments` did (so `requireWithinNamespace` and the `resolve/main` prefix check still catch
+it), and `appendOpaqueSegment` keeps Ollama's `tag` segment literal exactly like OkHttp's singular
+`addPathSegment` did (see `KtorUrlCompat.kt`).
 
 **Relationship to `RepoDownloader.resolveInside`: dominance, not coincidence.** `resolveInside(stagingDir,
 remote.path)` already guards the *filesystem* destination built from the same `path`, before

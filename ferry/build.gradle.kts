@@ -98,9 +98,9 @@ tasks.register("checkEmbeddable") {
         // EmbeddabilityTest cannot catch a regression that moves these back to implementation: it
         // compiles against this module's source, where both configurations put HttpClient and okio's
         // types on the compile classpath the same way, so it would pass either way. Proving it for
-        // real needs a consumer project built against the published artifact, and nothing is
-        // published yet — this checks the one thing that is cheap to check from inside the module:
-        // that the declared configuration is still api, not just that the types resolve.
+        // real needs a separate consumer project built against the published artifact, which this
+        // module doesn't have — this checks the one thing that is cheap to check from inside the
+        // module: that the declared configuration is still api, not just that the types resolve.
         val apiDependencyIds = configurations.getByName("commonMainApi").allDependencies
             .map { "${it.group}:${it.name}" }
         val missingFromApi = commonMainApiDependencies.filter { it !in apiDependencyIds }

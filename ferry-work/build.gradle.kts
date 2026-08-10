@@ -10,7 +10,7 @@ plugins {
 
 // See :ferry's build.gradle.kts for what 0.x signals here.
 group = "dev.thuat"
-version = "0.1.0"
+version = "0.2.0"
 
 android {
     namespace = "dev.thuat.ferry.work"
@@ -63,7 +63,7 @@ dependencies {
     api("androidx.work:work-runtime-ktx:2.11.2")
 
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("androidx.work:work-testing:2.11.2")
 }

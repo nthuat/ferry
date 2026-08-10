@@ -18,9 +18,16 @@ that Gradle resolves automatically. Two breaking changes for existing JVM/Androi
   (`io.ktor:ktor-client-okhttp`, already on `:ferry`'s own `api` configuration for a JVM/Android
   consumer, so no new dependency to add).
 
-Also: the whole repo (`:ferry`, `:ferry-work`, `:sample`) now builds on Kotlin 2.1.21, up from
-whatever `:ferry`'s previous release shipped against — required for Ktor's native (iOS) klibs, which
-`:ferry` now depends on directly.
+Additive, not breaking: `Ferry.huggingFace()`/`modelScope()`/`ollama()` also take a `fileSystem:
+FileSystem` parameter now, defaulting to the platform's real filesystem — a caller that doesn't
+already customize the client or dispatcher needs no code change.
+
+Also: the whole repo (`:ferry`, `:ferry-work`, `:sample`) now builds on Kotlin 2.1.21, up from 2.0.21
+— required for Ktor's native (iOS) klibs, which `:ferry` now depends on directly.
+
+`:ferry-work` is now `0.2.0` too, bumped in lockstep: it depends on `:ferry`'s `okio.Path`-based API
+above, and its own `0.1.0` release is immutably on Maven Central compiled against `:ferry` `0.1.0`'s
+`java.io.File`-based API, so it cannot be reused against this release.
 
 ## 0.1.0
 

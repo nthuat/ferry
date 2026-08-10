@@ -8,7 +8,7 @@ depends on it. A host with no interest in WorkManager takes only `:ferry` and ne
 
 ```kotlin
 dependencies {
-    implementation("dev.thuat:ferry-work:0.1.0")
+    implementation("dev.thuat:ferry-work:0.2.0")
 }
 ```
 

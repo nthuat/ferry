@@ -23,7 +23,7 @@ A JVM-only or Android-only consumer declares the exact same coordinate — Gradl
 ```kotlin
 implementation("dev.thuat:ferry:0.2.0")
 // Optional and additive, JVM/Android only. Only if you want WorkManager backgrounding:
-implementation("dev.thuat:ferry-work:0.1.0")
+implementation("dev.thuat:ferry-work:0.2.0")
 ```
 
 ```kotlin
@@ -118,7 +118,7 @@ host-controlled foreground notification, WorkManager's retry and backoff, and a 
 `:ferry` cannot provide. Nothing in `:ferry` depends on it.
 
 ```kotlin
-implementation("dev.thuat:ferry-work:0.1.0")
+implementation("dev.thuat:ferry-work:0.2.0")
 
 WorkManager.getInstance(context)
     .enqueueRepoDownload(repoId = "google/gemma-2-2b-it", into = filesDir, notificationId = 42)

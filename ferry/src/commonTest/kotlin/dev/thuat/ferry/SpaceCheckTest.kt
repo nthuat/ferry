@@ -6,11 +6,9 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import okio.Path
 import okio.Path.Companion.toPath
-import okio.fakefilesystem.FakeFileSystem
 
 class SpaceCheckTest {
 
-    private val fakeFileSystem = FakeFileSystem()
     private val oneGb = 1024L * 1024 * 1024
 
     private fun manifestOf(vararg sizes: Long) = RepoManifest(

@@ -2,11 +2,18 @@
 
 package dev.thuat.ferry
 
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import io.ktor.utils.io.writeStringUtf8
+import io.ktor.utils.io.writer
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.yield
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -255,5 +262,46 @@ class ResumableDownloaderTest {
         assertEquals(20L, seen.last().first)
         assertEquals(20L, seen.last().second) // not 12, the size of this response's body
         assertTrue(seen.first().first > 8L, "progress must start past the resumed bytes")
+    }
+
+    /**
+     * Cancelling mid-transfer must not be swallowed into a `Result` — `download`'s own
+     * `catch (e: CancellationException) { throw e }` exists precisely so structured concurrency
+     * still sees the cancellation, rather than reporting it as an ordinary failure.
+     *
+     * A response body of static, already-buffered bytes (as `QueueClient` hands out) never
+     * actually suspends between reads, so cancelling mid-loop would never be observed before the
+     * whole body was already written — this fakes a slow server instead, a [writer] streaming one
+     * chunk at a time with a real suspension between them, so the download coroutine is genuinely
+     * parked mid-transfer, with something for cancellation to interrupt, when it is cancelled.
+     */
+    @Test
+    fun `cancelling after the first progress callback leaves the part file - not the target`() = runTest {
+        val chunk = "z".repeat(8 * 1024) // one downloader read-buffer's worth per chunk
+        val slowClient = HttpClient(
+            MockEngine { _ ->
+                val body = backgroundScope.writer(autoFlush = true) {
+                    repeat(3) {
+                        channel.writeStringUtf8(chunk)
+                        channel.flush()
+                        yield() // a real suspension point for the reader to park on
+                    }
+                }.channel
+                respond(body, HttpStatusCode.OK)
+            },
+        )
+        val slowDownloader = ResumableDownloader(slowClient, fs, UnconfinedTestDispatcher(testScheduler))
+
+        var progressCalls = 0
+        val job = launch {
+            slowDownloader.download(url, target()) { _, _ -> progressCalls++ }
+        }
+        while (progressCalls < 1) yield()
+        job.cancel()
+        job.join()
+
+        assertTrue(job.isCancelled, "the job must complete as cancelled, not as a normal Result")
+        assertFalse(fs.exists(target()), "a cancelled download must never produce the target file")
+        assertTrue(fs.exists(partFile()), "the part file is the resume point and must survive cancellation")
     }
 }
