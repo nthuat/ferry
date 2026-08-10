@@ -3,7 +3,7 @@
 [![Maven Central](https://img.shields.io/maven-central/v/dev.thuat/ferry)](https://central.sonatype.com/artifact/dev.thuat/ferry)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
-Downloads AI model repositories to Android devices, and refuses to do it badly.
+Downloads AI model repositories to Android and iOS devices, and refuses to do it badly.
 
 Fetches a HuggingFace, ModelScope or Ollama repo, refuses to start without the disk space to finish
 it, and verifies every published SHA-256 before committing anything. A failed or interrupted download
