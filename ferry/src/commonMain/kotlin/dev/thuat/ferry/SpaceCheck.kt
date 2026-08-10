@@ -53,7 +53,7 @@ private fun nearestExistingAncestor(fileSystem: FileSystem, dir: Path): Path =
  * hit it too had this stayed a `RepoDownloader`-only fix.
  */
 val DefaultFreeSpaceProbe = FreeSpaceProbe { dir ->
-    availableBytes(nearestExistingAncestor(FileSystem.SYSTEM, dir))
+    availableBytes(nearestExistingAncestor(defaultFileSystem(), dir))
 }
 
 /**

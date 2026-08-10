@@ -15,8 +15,9 @@ import dev.thuat.ferry.RepoManifest
 import dev.thuat.ferry.RepoProgress
 import dev.thuat.ferry.ResumableDownloader
 import dev.thuat.ferry.SpaceCheck
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.okhttp.OkHttp
 import kotlinx.coroutines.runBlocking
-import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.SocketPolicy
@@ -72,7 +73,7 @@ class RepoDownloadWorkerTest {
 
     private fun downloaderFor(files: List<RemoteFile>, freeBytes: Long = Long.MAX_VALUE) = RepoDownloader(
         repo = fakeRepo(files),
-        downloader = ResumableDownloader(OkHttpClient()),
+        downloader = ResumableDownloader(HttpClient(OkHttp)),
         spaceCheck = SpaceCheck(probe = { freeBytes }, headroomBytes = 0L),
     )
 

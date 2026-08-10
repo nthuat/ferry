@@ -9,6 +9,8 @@ import dev.thuat.ferry.RepoDownloader
 import dev.thuat.ferry.RepoProgress
 import dev.thuat.ferry.ResumableDownloader
 import dev.thuat.ferry.SpaceCheck
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.okhttp.OkHttp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,7 +19,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
+import okio.Path
+import okio.Path.Companion.toOkioPath
 import java.io.File
 import java.io.RandomAccessFile
 
@@ -31,7 +34,7 @@ import java.io.RandomAccessFile
  */
 class SampleViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val downloadRoot = File(application.filesDir, "models")
+    private val downloadRoot: Path = File(application.filesDir, "models").toOkioPath()
 
     /** How a real host uses the library. */
     private val realDownloader = Ferry.huggingFace()
@@ -41,7 +44,7 @@ class SampleViewModel(application: Application) : AndroidViewModel(application) 
      * — the facade takes no `FreeSpaceProbe`, deliberately, and this is exactly the seam it leaves
      * open for a caller who needs one: `SpaceCheck(probe = ...)` passed straight into `RepoDownloader`.
      */
-    private val sabotageClient = OkHttpClient()
+    private val sabotageClient = HttpClient(OkHttp)
     private val sabotageDownloader = RepoDownloader(
         repo = HuggingFace(client = sabotageClient),
         downloader = ResumableDownloader(sabotageClient),
@@ -196,7 +199,7 @@ class SampleViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun corruptLargestFile(catalog: ModelCatalogEntry): String {
-        val dir = File(downloadRoot, catalog.repoId)
+        val dir = File(downloadRoot.toFile(), catalog.repoId)
         // FERRY_MARKER_FILE mirrors RepoDownloader's own private MARKER_FILE constant — not part of
         // Ferry's public API, so this is an assumption about a library internal, not a contract. The
         // actual safety net is maxByOrNull below: a marker is a few bytes of repoId text and will

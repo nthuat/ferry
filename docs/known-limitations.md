@@ -187,13 +187,13 @@ point of the marker. There is no API to clear it; the error message says to remo
 
 ## The `api` configuration is not regression-detectable from inside the module
 
-`OkHttpClient` and `CoroutineDispatcher` are on `api` so a consumer can pass its own client, which is
+`HttpClient` and `CoroutineDispatcher` are on `api` so a consumer can pass its own client, which is
 what `EmbeddabilityTest` exists to protect. That test compiles against module source and would pass
 under `implementation` too, so it cannot catch a regression. Proving it needs a consumer project
 built against the published artifact, and nothing is published yet.
 
 **Cheap partial fix, done:** `checkEmbeddable` asserts that the `api` configuration's dependencies
-include okhttp and a module exporting `CoroutineDispatcher`.
+include Ktor's `HttpClient` and a module exporting `CoroutineDispatcher`.
 
 ## ModelScope's file listing may paginate above what has been tested
 

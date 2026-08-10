@@ -14,6 +14,7 @@ import dev.thuat.ferry.RepoDownloader
 import dev.thuat.ferry.RepoProgress
 import dev.thuat.ferry.VerificationException
 import kotlinx.coroutines.CancellationException
+import okio.Path.Companion.toOkioPath
 import java.io.File
 import androidx.work.ListenableWorker.Result as WorkResult
 
@@ -172,7 +173,7 @@ class RepoDownloadWorker internal constructor(
             setForeground(foregroundInfo(notifications.notificationFor(repoId, null), notificationId))
 
             val throttle = RepoDownloadThrottle(nowMillis = nowMillis)
-            val result = repoDownloader.download(repoId, File(intoPath)) { progress ->
+            val result = repoDownloader.download(repoId, File(intoPath).toOkioPath()) { progress ->
                 if (throttle.shouldEmit(progress)) {
                     setProgressAsync(progress.toProgressData())
                     setForegroundAsync(
@@ -182,7 +183,7 @@ class RepoDownloadWorker internal constructor(
             }
 
             result.fold(
-                onSuccess = { file -> WorkResult.success(workDataOf(KEY_OUTPUT_PATH to file.absolutePath)) },
+                onSuccess = { path -> WorkResult.success(workDataOf(KEY_OUTPUT_PATH to path.toString())) },
                 onFailure = { error -> failureOrRetry(error) },
             )
         } catch (e: CancellationException) {

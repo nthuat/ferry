@@ -41,7 +41,7 @@ import okio.use
  */
 class ResumableDownloader(
     private val client: HttpClient,
-    private val fileSystem: FileSystem = FileSystem.SYSTEM,
+    private val fileSystem: FileSystem = defaultFileSystem(),
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
 

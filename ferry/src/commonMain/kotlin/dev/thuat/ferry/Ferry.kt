@@ -17,7 +17,7 @@ object Ferry {
 
     fun huggingFace(
         client: HttpClient = defaultHttpClient(),
-        fileSystem: FileSystem = FileSystem.SYSTEM,
+        fileSystem: FileSystem = defaultFileSystem(),
         baseUrl: String = "https://huggingface.co",
     ): RepoDownloader = RepoDownloader(
         repo = HuggingFace(client = client, baseUrl = baseUrl),
@@ -27,7 +27,7 @@ object Ferry {
 
     fun modelScope(
         client: HttpClient = defaultHttpClient(),
-        fileSystem: FileSystem = FileSystem.SYSTEM,
+        fileSystem: FileSystem = defaultFileSystem(),
         baseUrl: String = "https://modelscope.cn",
         revision: String = "master",
     ): RepoDownloader = RepoDownloader(
@@ -38,7 +38,7 @@ object Ferry {
 
     fun ollama(
         client: HttpClient = defaultHttpClient(),
-        fileSystem: FileSystem = FileSystem.SYSTEM,
+        fileSystem: FileSystem = defaultFileSystem(),
         baseUrl: String = "https://registry.ollama.ai",
     ): RepoDownloader = RepoDownloader(
         repo = Ollama(client = client, baseUrl = baseUrl),

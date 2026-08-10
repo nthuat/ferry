@@ -140,7 +140,7 @@ class RepoDownloader(
     private val repo: ModelHub,
     private val downloader: ResumableDownloader,
     private val spaceCheck: SpaceCheck = SpaceCheck(),
-    private val fileSystem: FileSystem = FileSystem.SYSTEM,
+    private val fileSystem: FileSystem = defaultFileSystem(),
     private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
 

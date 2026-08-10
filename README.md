@@ -9,16 +9,29 @@ Fetches a HuggingFace, ModelScope or Ollama repo, refuses to start without the d
 it, and verifies every published SHA-256 before committing anything. A failed or interrupted download
 resumes across process death.
 
+`:ferry` is a Kotlin Multiplatform library — JVM and iOS today. A `commonMain` consumer (an iOS app,
+a shared module) declares one coordinate and Gradle resolves the target-specific artifact for
+whichever platform it's building:
+
 ```kotlin
-implementation("dev.thuat:ferry:0.1.0")
-// Optional and additive. Only if you want WorkManager backgrounding:
+implementation("dev.thuat:ferry:0.2.0")
+```
+
+A JVM-only or Android-only consumer declares the exact same coordinate — Gradle resolves it to
+`ferry-jvm` under the hood, nothing platform-specific to spell out:
+
+```kotlin
+implementation("dev.thuat:ferry:0.2.0")
+// Optional and additive, JVM/Android only. Only if you want WorkManager backgrounding:
 implementation("dev.thuat:ferry-work:0.1.0")
 ```
 
 ```kotlin
+import okio.Path.Companion.toOkioPath
+
 val ferry = Ferry.huggingFace()
 
-ferry.download("google/gemma-2-2b-it", context.filesDir) { progress ->
+ferry.download("google/gemma-2-2b-it", context.filesDir.toOkioPath()) { progress ->
     when (progress) {
         is RepoProgress.CheckingSpace -> …
         is RepoProgress.Downloading -> …
@@ -33,7 +46,8 @@ ferry.download("google/gemma-2-2b-it", context.filesDir) { progress ->
 }
 ```
 
-Three hubs, same call:
+Three hubs, same call. `dir` is an `okio.Path` — `context.filesDir.toOkioPath()` above is how a
+`java.io.File` becomes one; on iOS, build the `Path` directly with `okio.Path.Companion.toPath()`.
 
 ```kotlin
 Ferry.huggingFace().download("google/gemma-2-2b-it", dir)
@@ -41,11 +55,16 @@ Ferry.modelScope().download("Qwen/Qwen2.5-0.5B-Instruct", dir)
 Ferry.ollama().download("qwen2.5:0.5b", dir)
 ```
 
-Each takes an `OkHttpClient` if you have one. Pass it if you do: every request Ferry makes then
-travels through your interceptors, your timeouts and your proxy config.
+Each takes a Ktor `HttpClient` if you have one. Pass it if you do: every request Ferry makes then
+travels through your interceptors, your timeouts and your proxy config. Already have an
+`OkHttpClient`? Wrap it rather than build a fresh one:
 
-`:ferry` is a plain `java-library` module with no `android.*` reference in it, so a consumer on
-Android declares its own `<uses-permission android:name="android.permission.INTERNET" />`.
+```kotlin
+Ferry.huggingFace(client = HttpClient(OkHttp) { engine { preconfigured = yourOkHttpClient } })
+```
+
+`:ferry` has no `android.*` reference in it, so a consumer on Android declares its own
+`<uses-permission android:name="android.permission.INTERNET" />`.
 
 ## How a download works
 
@@ -121,10 +140,11 @@ on demand, both built on seams the library already exposes.
 ## Building
 
 ```bash
-./gradlew :ferry:test
+./gradlew :ferry:jvmTest
 ```
 
-`:ferry` needs only a JDK. The rest of the repo (`:ferry-work` and `:sample`) also needs an Android
+`:ferry`'s JVM target needs only a JDK; `./gradlew :ferry:iosSimulatorArm64Test` additionally needs
+Xcode and an iOS simulator. The rest of the repo (`:ferry-work` and `:sample`) also needs an Android
 SDK with API 35, and a JDK between 17 and 21. The upper bound is Gradle 8.9's: a newer JDK fails
 during script compilation with a bare `IllegalArgumentException` naming the JDK's own version and
 nothing else.
@@ -140,6 +160,7 @@ JAVA_HOME=/path/to/jdk-21 ./gradlew :ferry:check
 - [Backgrounding](docs/ferry-work.md). `:ferry-work` setup and every design decision behind it.
 - [Known limitations](docs/known-limitations.md). What is open, what is closed, and why.
 - [Releasing](docs/releasing.md). Maintainer-only.
+- [Changelog](CHANGELOG.md). What changed release to release, including migration notes for breaking changes.
 
 ## 0.x
 
