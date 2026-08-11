@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO
 import kotlinx.coroutines.withContext
+import okio.ByteString.Companion.encodeUtf8
 import okio.FileSystem
 import okio.IOException
 import okio.Path
@@ -145,45 +146,56 @@ class RepoDownloader(
 ) {
 
     /**
-     * Downloads [repoId] into a directory under [into] and returns it.
+     * Downloads the whole of [repoId] — every manifest file — into a directory under [into].
      *
-     * **Not safe to call concurrently for the same [repoId] and [into].** Both calls stage into the
-     * same scratch directory and write into it independently — interleaved writes to the same
-     * destination file are a corruption risk on their own. Whichever commits first renames staging
-     * onto `target`; if the other still holds open file descriptors into it, its writes follow the
-     * inode into what is now a committed repo. If the second call reaches its own commit afterward,
-     * `target`'s marker still names the same repo id, so the guard against replacing a directory
-     * this method did not write does not catch this either: the second call deletes the first's
-     * freshly committed repo and renames its own version over it. Serialising calls per repo id is
-     * the caller's responsibility; different repo ids are independent. See also [abandonStaging]'s
-     * own KDoc for the same hazard between `abandonStaging` and `download`.
+     * Exists as a distinct overload, not a default on the filtered form, **solely for binary
+     * compatibility**: the published dev.thuat:ferry-work:0.2.0 was compiled against this exact
+     * JVM descriptor (`download(String, Path, Function1, Continuation)`) and its synthetic
+     * default-argument bridge. Folding it into the 4-parameter function as `fileFilter: Regex? =
+     * null` keeps every caller *compiling* but breaks every already-published caller at runtime
+     * with NoSuchMethodError. See BinaryCompatTest in jvmTest, which pins this descriptor.
      */
     suspend fun download(
         repoId: String,
         into: Path,
         onProgress: (RepoProgress) -> Unit = {},
+    ): Result<Path> = download(repoId, into, fileFilter = null, onProgress = onProgress)
+
+    /**
+     * Downloads [repoId] into a directory under [into] and returns it.
+     *
+     * **Not safe to call concurrently for the same [repoId] and [into].** Two such calls sharing the
+     * same [fileFilter] stage into the same scratch directory and write into it independently —
+     * interleaved writes to the same destination file are a corruption risk on their own. Whichever
+     * commits first renames staging onto `target`; if the other still holds open file descriptors
+     * into it, its writes follow the inode into what is now a committed repo. If the second call
+     * reaches its own commit afterward, `target`'s marker still names the same repo id, so the guard
+     * against replacing a directory this method did not write does not catch this either: the second
+     * call deletes the first's freshly committed repo and renames its own version over it. A
+     * *different* [fileFilter] stages into its own sibling scratch directory instead of the same one
+     * — but both calls still race each other at the shared `target`, where the loser is refused by
+     * the commit-time filter-identity check (its marker no longer matches), not deleted. Serialising
+     * calls per repo id is the caller's responsibility; different repo ids are independent. See also
+     * [abandonStaging]'s own KDoc for the same hazard between `abandonStaging` and `download`.
+     *
+     * [fileFilter] selects the subset of the manifest to download: a file is selected when
+     * `fileFilter.containsMatchIn(remoteFile.path)` — substring semantics against the
+     * manifest-declared path, so `Regex("Q4_K_M")` is enough for the common case; a pattern
+     * wanting a whole-path match anchors itself (`^...$`). `null` means every file, on exactly
+     * the code path the 3-argument overload has always taken. `fileFilter` has no default —
+     * that absence is what makes overload resolution against the 3-argument form unambiguous
+     * for every existing call shape. A filter matching nothing fails rather than committing an
+     * empty repo. The filter's identity (pattern and options together) keys both the staging
+     * directory and the committed directory's marker — see stagingDirFor and markerContent.
+     */
+    suspend fun download(
+        repoId: String,
+        into: Path,
+        fileFilter: Regex?,
+        onProgress: (RepoProgress) -> Unit = {},
     ): Result<Path> = withContext(dispatcher) {
         try {
-            // Inside the try, not before it: `repo` is a third-party ModelHub (its own KDoc), and
-            // nothing stops an implementation from throwing instead of returning Result.failure — a
-            // call site before this try let that throw escape download()'s own Result<Path> contract
-            // entirely. A throw here is now caught below like any other failure in this method.
-            // asDownloadFailure also normalises the well-behaved-looking case: a hub can return
-            // Result.failure(anything), an untyped Throwable that need not be an IOException, and
-            // every other failure this method hands back already is one.
-            val manifest = repo.manifest(repoId).getOrElse { failure ->
-                return@withContext Result.failure(failure.asDownloadFailure())
-            }
-
-            // An empty manifest is a listing that failed without saying so — a hub answering 200 with
-            // [], a revision that does not exist, a filter that matched nothing. Refused here because
-            // every downstream check is written as "every file is correct", and every file of no files
-            // is trivially correct: the cache check would call any directory that happened to exist a
-            // hit and return it, and with nothing there the commit step would publish a repo containing
-            // only its own marker. Both are permanent cache hits that no later call can repair.
-            if (manifest.files.isEmpty()) {
-                return@withContext Result.failure(IOException("no files listed for $repoId"))
-            }
+            val key = filterKey(fileFilter)
 
             // repoId is used as a relative path rather than flattened into one directory name, so
             // two distinct ids (e.g. "a/b" and "a--b") can never collide onto the same directory.
@@ -206,7 +218,7 @@ class RepoDownloader(
             // way target's own nesting question does (MARKER_ROOT) — see stagingDirFor's own doc for
             // the Critical that caused and the reserved per-id suffix that closes it.
             val stagingRoot = into / ".staging"
-            val stagingDir = stagingDirFor(stagingRoot, repoId)
+            val stagingDir = stagingDirFor(stagingRoot, repoId, key)
             val target = resolveInside(into, repoId)
 
             // Which ids are committed *nested inside* repoId — see MARKER_ROOT's doc for the shape
@@ -227,6 +239,67 @@ class RepoDownloader(
                 throw IOException("repo id collides with the marker directory: $repoId")
             }
 
+            // Filter-identity gate, before the manifest fetch: it needs only repoId, into and the
+            // filter's identity, so a mismatch knowable from one marker read is refused before any
+            // network request and before the cache-hit check below can call a directory committed
+            // under a broader selection a hit for a narrower one. Fires only on a marker that is
+            // recognisably this repo id with a different filter identity: an absent marker or a
+            // foreign id falls straight through to today's behavior — the cache-hit check may still
+            // hit, and the commit-time gate below still produces today's foreign-directory refusal.
+            // The prefix test chooses the error *message*, never the verdict: acceptance anywhere
+            // in this file is whole-string equality against markerContent, which a pathological
+            // repo id cannot forge.
+            val marker = target / MARKER_FILE
+            if (fileSystem.metadataOrNull(marker)?.isRegularFile == true) {
+                val content = fileSystem.read(marker) { readUtf8() }
+                if (content != markerContent(repoId, key) &&
+                    (content == repoId || content.startsWith("$repoId\n"))
+                ) {
+                    throw IOException(
+                        "$target was committed by Ferry under '$repoId' with a different file " +
+                            "filter; refusing to replace it — remove the directory to retry",
+                    )
+                }
+            }
+
+            // Inside the try, not before it: `repo` is a third-party ModelHub (its own KDoc), and
+            // nothing stops an implementation from throwing instead of returning Result.failure — a
+            // call site before this try let that throw escape download()'s own Result<Path> contract
+            // entirely. A throw here is now caught below like any other failure in this method.
+            // asDownloadFailure also normalises the well-behaved-looking case: a hub can return
+            // Result.failure(anything), an untyped Throwable that need not be an IOException, and
+            // every other failure this method hands back already is one.
+            val manifest = repo.manifest(repoId).getOrElse { failure ->
+                return@withContext Result.failure(failure.asDownloadFailure())
+            }
+
+            // An empty manifest is a listing that failed without saying so — a hub answering 200 with
+            // [], a revision that does not exist. Refused here because
+            // every downstream check is written as "every file is correct", and every file of no files
+            // is trivially correct: the cache check would call any directory that happened to exist a
+            // hit and return it, and with nothing there the commit step would publish a repo containing
+            // only its own marker. Both are permanent cache hits that no later call can repair.
+            if (manifest.files.isEmpty()) {
+                return@withContext Result.failure(IOException("no files listed for $repoId"))
+            }
+
+            // Selection happens once, here, and every downstream decision — cache hit, space check,
+            // satisfiedPaths, the transfer loop, pruneOrphans, the pre-commit re-verification — uses
+            // `selected` in place of `manifest`. The manifest itself is only the hub's full listing.
+            val selected = manifest.copy(
+                files = manifest.files.filter {
+                    fileFilter == null || fileFilter.containsMatchIn(it.path)
+                },
+            )
+
+            // Same shape and reason as the empty-manifest guard above: every downstream check is
+            // "every file is correct", and zero files is trivially correct — exactly what must not
+            // commit. The guard above catches an empty upstream listing; this one catches a filter
+            // that matched nothing, which selected.files can be even when manifest.files is not.
+            if (selected.files.isEmpty()) {
+                return@withContext Result.failure(IOException("no files matched the filter for $repoId"))
+            }
+
             // Already here and still correct: the cheapest possible outcome, and the one a naive
             // implementation misses by re-fetching gigabytes the device is already holding.
             //
@@ -238,7 +311,7 @@ class RepoDownloader(
             // space at all, and must not be refused because the device that already holds it has
             // since filled up. Nothing above this line writes anything, so a hit is returned here
             // having touched the filesystem only to read it.
-            if (fileSystem.metadataOrNull(target)?.isDirectory == true && manifest.isSatisfiedBy(target)) {
+            if (fileSystem.metadataOrNull(target)?.isDirectory == true && selected.isSatisfiedBy(target)) {
                 onProgress(RepoProgress.Complete(repoId, target))
                 return@withContext Result.success(target)
             }
@@ -256,7 +329,7 @@ class RepoDownloader(
             // here would only protect callers who go through RepoDownloader, and SpaceCheck is public,
             // usable directly for a preflight check without ever calling download() at all.
             //
-            // manifest.creditingStaged(stagingDir, satisfiedPaths), not manifest itself: a download
+            // selected.creditingStaged(stagingDir, satisfiedPaths), not selected itself: a download
             // staged 90% already needs only the remaining 10%, and reserving the full total tells a
             // device with room to finish it has no room to start — worse the more progress a resume
             // has made, which is exactly backwards. See creditingStaged's own doc for what is and is
@@ -270,10 +343,10 @@ class RepoDownloader(
             // single network request. Computed against the manifest as given, not the space-credited
             // copy below, since sizeBytes is exactly what changes between the two.
             onProgress(RepoProgress.CheckingSpace(repoId))
-            val satisfiedPaths = manifest.files
+            val satisfiedPaths = selected.files
                 .filter { it.isSatisfiedIn(stagingDir) }
                 .mapTo(HashSet()) { it.path }
-            val report = spaceCheck.check(manifest.creditingStaged(stagingDir, satisfiedPaths), into)
+            val report = spaceCheck.check(selected.creditingStaged(stagingDir, satisfiedPaths), into)
             if (!report.sufficient) {
                 return@withContext Result.failure(InsufficientSpaceException(report))
             }
@@ -283,9 +356,9 @@ class RepoDownloader(
             // Durable staging (kept since Task 1) can carry scratch from a manifest this attempt no
             // longer agrees with. Pruned before the loop below touches anything, so a stale file
             // never has a chance to be mistaken for progress worth resuming.
-            pruneOrphans(stagingDir, manifest)
+            pruneOrphans(stagingDir, selected)
 
-            manifest.files.forEachIndexed { index, remote ->
+            selected.files.forEachIndexed { index, remote ->
                 // remote.path comes from the hub's manifest over the network — untrusted the same
                 // way repoId is. Without this, a hostile listing could write anywhere on disk.
                 val destination = resolveInside(stagingDir, remote.path)
@@ -304,7 +377,7 @@ class RepoDownloader(
                 // isSatisfiedIn actually verified, so a staged file that merely exists but does not
                 // match still falls through to an ordinary fetch below.
                 if (remote.path in satisfiedPaths) {
-                    onProgress(RepoProgress.Skipped(repoId, remote.path, index, manifest.files.size))
+                    onProgress(RepoProgress.Skipped(repoId, remote.path, index, selected.files.size))
                     return@forEachIndexed
                 }
 
@@ -319,7 +392,7 @@ class RepoDownloader(
                             repoId = repoId,
                             path = remote.path,
                             fileIndex = index,
-                            fileCount = manifest.files.size,
+                            fileCount = selected.files.size,
                             bytesWritten = written,
                             fileBytes = remote.sizeBytes,
                         ),
@@ -374,14 +447,13 @@ class RepoDownloader(
             // ownership of a directory — Ferry's own write always lands last, overwriting it. A
             // manifest entry named ".ferry" *in a subdirectory* is not shadowed by this at all and
             // downloads as ordinary content: this write only ever touches stagingDir's own root.
-            fileSystem.write(stagingDir / MARKER_FILE) { writeUtf8(repoId) }
+            fileSystem.write(stagingDir / MARKER_FILE) { writeUtf8(markerContent(repoId, key)) }
 
             if (fileSystem.exists(target)) {
                 // An absent marker is a refusal, not an exception: something Ferry did not write is
                 // sitting here, and that is precisely what must not be deleted to make room.
-                val marker = target / MARKER_FILE
                 val markerIsFile = fileSystem.metadataOrNull(marker)?.isRegularFile == true
-                if (!markerIsFile || fileSystem.read(marker) { readUtf8() } != repoId) {
+                if (!markerIsFile || fileSystem.read(marker) { readUtf8() } != markerContent(repoId, key)) {
                     throw IOException(
                         "$target was not committed by Ferry under '$repoId'; refusing to replace " +
                             "it — remove the directory to retry",
@@ -442,7 +514,7 @@ class RepoDownloader(
             // it looked at every file before the race landed — and publishes a repo silently missing
             // whatever vanished, as Result.success. This turns that into a clean Result.failure
             // instead, with nothing committed.
-            val corrupted = manifest.files.firstOrNull { file ->
+            val corrupted = selected.files.firstOrNull { file ->
                 fileSystem.sizeOf(resolveInside(stagingDir, file.path)) != file.sizeBytes
             }
             if (corrupted != null) {
@@ -529,13 +601,14 @@ class RepoDownloader(
      *
      * No staging present for [repoId] is success, not failure: the caller asked for a state — this
      * repo's staging reclaimed — and that state already holds.
+     *
+     * Sweeps every filter's staging directory for [repoId], unfiltered and keyed alike — see
+     * [stagingDirsFor] — so "wipes all staging for this repo id" is now literally true.
      */
     suspend fun abandonStaging(repoId: String, into: Path): Result<Unit> = withContext(dispatcher) {
         try {
-            val stagingRoot = into / ".staging"
-            val stagingDir = stagingDirFor(stagingRoot, repoId)
-            if (fileSystem.exists(stagingDir)) {
-                fileSystem.deleteRecursively(stagingDir)
+            stagingDirsFor(into / ".staging", repoId).forEach { dir ->
+                fileSystem.deleteRecursively(dir)
             }
             Result.success(Unit)
         } catch (e: IOException) {
@@ -597,35 +670,40 @@ class RepoDownloader(
      * here and then discarded there, without ever being resumed. Not a gap this method could close
      * without a manifest to check against; stated here rather than left for the list above to imply
      * a completeness it cannot have.
+     *
+     * Sums across every filter's staging directory for [repoId], unfiltered and keyed alike — see
+     * [stagingDirsFor] — so for a repo id with two filters staged this is their union, not what one
+     * particular filtered [download] would actually reuse; one more way this is a hint, not a
+     * promise.
      */
     suspend fun stagedBytes(repoId: String, into: Path): Long = withContext(dispatcher) {
         try {
-            val stagingDir = stagingDirFor(into / ".staging", repoId)
-            val marker = stagingDir / MARKER_FILE
-            if (fileSystem.metadataOrNull(stagingDir)?.isDirectory != true) {
-                0L
-            } else {
-                fileSystem.listRecursively(stagingDir)
-                    .filter { fileSystem.metadataOrNull(it)?.isRegularFile == true && it != marker }
-                    .sumOf { staged ->
-                        when {
-                            staged.name.endsWith(".validator") -> 0L
-                            staged.name.endsWith(".part") -> {
-                                val validator =
-                                    staged.parent!! / "${staged.name.removeSuffix(".part")}.validator"
-                                if (fileSystem.metadataOrNull(validator)?.isRegularFile == true) {
-                                    fileSystem.sizeOf(staged)
-                                } else {
-                                    0L
-                                }
-                            }
-                            else -> fileSystem.sizeOf(staged)
-                        }
-                    }
-            }
+            stagingDirsFor(into / ".staging", repoId).sumOf { stagedBytesIn(it) }
         } catch (e: IOException) {
             0L
         }
+    }
+
+    private fun stagedBytesIn(stagingDir: Path): Long {
+        val marker = stagingDir / MARKER_FILE
+        if (fileSystem.metadataOrNull(stagingDir)?.isDirectory != true) return 0L
+        return fileSystem.listRecursively(stagingDir)
+            .filter { fileSystem.metadataOrNull(it)?.isRegularFile == true && it != marker }
+            .sumOf { staged ->
+                when {
+                    staged.name.endsWith(".validator") -> 0L
+                    staged.name.endsWith(".part") -> {
+                        val validator =
+                            staged.parent!! / "${staged.name.removeSuffix(".part")}.validator"
+                        if (fileSystem.metadataOrNull(validator)?.isRegularFile == true) {
+                            fileSystem.sizeOf(staged)
+                        } else {
+                            0L
+                        }
+                    }
+                    else -> fileSystem.sizeOf(staged)
+                }
+            }
     }
 
     /**
@@ -797,6 +875,37 @@ class RepoDownloader(
             }
     }
 
+    /** Injective over (pattern, options): the length prefix delimits the pattern exactly. */
+    private fun canonicalIdentity(filter: Regex): String =
+        "${filter.pattern.length}:${filter.pattern}" +
+            filter.options.map { it.name }.sorted().joinToString(",")
+
+    /**
+     * "" for the unfiltered case; 64 lowercase hex characters otherwise.
+     *
+     * Hashed rather than embedded because the identity appears in a filesystem path segment,
+     * where a raw pattern cannot go — it may contain '/', '\n', arbitrary length, and case a
+     * case-insensitive filesystem would fold. canonicalIdentity is never parsed, only hashed,
+     * so it needs injectivity and nothing else.
+     */
+    private fun filterKey(filter: Regex?): String =
+        filter?.let { canonicalIdentity(it).encodeUtf8().sha256().hex() } ?: ""
+
+    /**
+     * What `target/[MARKER_FILE]` contains — written, compared whole-string, **never parsed**.
+     *
+     * The unfiltered writer emits exactly [repoId], byte for byte what every version of ferry has
+     * ever written, with no trailing separator: a directory committed by a pre-filter ferry reads
+     * back equal to what an unfiltered call expects, so it stays a valid cache hit and a valid
+     * commit target with no migration. The filtered writer emits [repoId], one '\n', and the 64
+     * lowercase hex characters of [filterKey]. Both [repoId] and a Regex pattern may legally
+     * contain '\n', which is why no field is ever extracted back out of this string — the
+     * accept/reject decision everywhere is whole-string equality, and the pattern's own newlines
+     * never reach the file at all because only its hash does.
+     */
+    private fun markerContent(repoId: String, filterKey: String): String =
+        if (filterKey.isEmpty()) repoId else "$repoId\n$filterKey"
+
     /**
      * Where [repoId] stages under [stagingRoot] (`into/.staging`).
      *
@@ -825,19 +934,59 @@ class RepoDownloader(
      * library's own reserved suffix; it is the same shape of residual docs/known-limitations.md
      * already accepts for a `..` that reconstructs a legitimate-looking path, and no more reachable —
      * stated here rather than left silent, not treated as a gap worth closing beyond that.
+     *
+     * A non-empty [filterKey] — always 64 lowercase hex characters, see [filterKey]'s own doc —
+     * appends as `-<key>` after [STAGING_SUFFIX], so every filter, including the absence of one,
+     * gets its own sibling scratch directory: `owner/model.d` unfiltered, `owner/model.d-<64 hex>`
+     * per filter. Appended to the last segment rather than nested inside `model.d`, because nesting
+     * would make the unfiltered directory a literal ancestor of every filtered one — reintroducing
+     * exactly the Critical this function's own history above describes.
      */
-    private fun stagingDirFor(stagingRoot: Path, repoId: String): Path {
+    private fun stagingDirFor(stagingRoot: Path, repoId: String, filterKey: String): Path {
         // Validates repoId exactly as an unsuffixed resolve always did — rejects "", "..", and any
         // escape — before this function's own suffixing gets a chance to be more permissive:
         // resolving "" + STAGING_SUFFIX lands on a proper descendant of stagingRoot, not stagingRoot
         // itself, so the "strictly inside" guard alone would not catch an empty repoId below.
         resolveInside(stagingRoot, repoId)
+        val suffix = if (filterKey.isEmpty()) STAGING_SUFFIX else "$STAGING_SUFFIX-$filterKey"
         // trimEnd('/'): a trailing separator must not turn the suffix into a new segment of its own
         // ("owner/" -> "owner/.d", three segments) instead of extending the last real one
         // ("owner.d", two) — repoId with or without a trailing slash names the same target directory
         // ((stagingRoot / "owner/").normalized() == (stagingRoot / "owner").normalized()), and must
         // name the same staging directory too.
-        return resolveInside(stagingRoot, "${repoId.trimEnd('/')}$STAGING_SUFFIX")
+        return resolveInside(stagingRoot, "${repoId.trimEnd('/')}$suffix")
+    }
+
+    /**
+     * Every staging directory belonging to [repoId] under [stagingRoot]: the unfiltered one and
+     * one per filter — `<last>.d` and `<last>.d-<64 lowercase hex>` siblings, where `<last>` is
+     * [repoId]'s trimmed final segment.
+     *
+     * The exactly-64-hex requirement is load-bearing, not decoration: a bare
+     * `startsWith("<last>.d-")` would match a *different* repo id's staging — an id literally
+     * named `m.d-x` stages at `m.d-x.d`, which starts with `m.d-`. Requiring the remainder to be
+     * exactly 64 hex characters excludes that for every possible id: a real staging directory
+     * name always ends in [STAGING_SUFFIX] (".d"), and '.' is not a hex character, so no other
+     * id's staging directory can ever satisfy the test. Unlike [stagingDirFor]'s documented
+     * deliberately-constructed-collision residual, this one has no residual at all.
+     *
+     * Resolves through [stagingDirFor] first so a hostile or malformed [repoId] is rejected
+     * exactly as everywhere else, before any listing happens.
+     */
+    private fun stagingDirsFor(stagingRoot: Path, repoId: String): List<Path> {
+        val unfiltered = stagingDirFor(stagingRoot, repoId, "")
+        val parent = unfiltered.parent ?: return emptyList()
+        val base = unfiltered.name
+        return (fileSystem.listOrNull(parent) ?: emptyList()).filter { entry ->
+            entry.name == base || isFilterKeyedSibling(entry.name, base)
+        }
+    }
+
+    /** Whether [name] is `[base]-` followed by exactly 64 lowercase hex characters. */
+    private fun isFilterKeyedSibling(name: String, base: String): Boolean {
+        if (!name.startsWith("$base-")) return false
+        val hex = name.substring(base.length + 1)
+        return hex.length == 64 && hex.all { it in '0'..'9' || it in 'a'..'f' }
     }
 
     /**

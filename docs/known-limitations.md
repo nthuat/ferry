@@ -452,3 +452,31 @@ already refuses this one layer up ("no files listed for $repoId" — see its own
 path this library ships is not exposed; a caller that calls `Ollama.manifest` directly — the way
 `SpaceCheck` is also called directly by a preflighting host — would see an empty manifest rather than a
 distinguishable error.
+
+## The filter-identity guarantee holds per verbatim repo-id spelling, not per resolved directory
+
+`resolveInside` normalizes a repo id before resolving it against `into`, so alias spellings —
+`"o/m"`, `"o/m/"`, `"o//m"`, `"o/./m"` — all resolve to the same `target` directory. The
+filter-identity gate (the marker check before the manifest fetch — see `download`'s own comment)
+does not: it compares the marker's content against the literal `repoId` string of *this* call,
+never a normalized form.
+
+**Condition:** a repo committed once under one spelling — say `"o/m"`, with some `fileFilter` —
+then requested again under a different spelling that resolves to the same directory — `"o/m/"`,
+`"o//m"`, `"o/./m"` — with a different filter (or none).
+
+**Consequence:** the gate's prefix test never matches a differently-spelled `repoId`, so the
+same-spelling refusal it exists to produce does not fire, and the request falls through to the
+structural cache-hit check below (`selected.isSatisfiedBy(target)`), which can say yes to content
+committed under a different filter. **No data-loss path**: this is a cache-hit gate, not the
+commit path. On a miss, the commit-time gate re-checks the marker against this call's own literal
+`repoId` and still refuses rather than deletes.
+
+**Why this stays open:** the comparison is verbatim by design — a marker written under an alias
+spelling by an earlier version was written with that literal text, and normalizing the comparison
+now would judge it against a rule that did not exist when it was written, with no way to migrate
+what is already on disk to match.
+
+**Mitigation:** none from Ferry. A caller consistent about which spelling it uses for a given
+`into` never reaches this; one that might pass aliased spellings for the same logical repo should
+canonicalize its own repo id before calling `download`.

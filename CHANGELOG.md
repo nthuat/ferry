@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.3.0
+
+`RepoDownloader.download` can download a subset of a repo's files — one quantisation variant out
+of a multi-variant GGUF repo, instead of all of them:
+
+```kotlin
+ferry.download(repoId, into, fileFilter = Regex("Q4_K_M")) { progress -> ... }
+```
+
+- **`fileFilter: Regex?`** — a new `download(repoId, into, fileFilter, onProgress)` overload
+  selects the manifest files whose path matches (`containsMatchIn`, substring semantics; anchor
+  with `^...$` for a whole-path match). Every guarantee — space preflight, resume, verification,
+  atomic commit — applies to the selected subset. A filter matching nothing fails rather than
+  committing an empty repo. Staging is keyed per filter, so switching filters mid-flight
+  preserves each filter's progress; `abandonStaging` reclaims all of them, and `stagedBytes`
+  sums across them. A `download` against a directory already committed under a *different*
+  filter (or none) is refused before any network request — remove the directory to switch
+  variants in place, or use a different `into` per variant.
+- **Additive, not breaking — and here is the mechanism, because 0.2.0's lesson was that the
+  label alone is not enough:** the existing 3-argument `download` keeps its exact JVM descriptor
+  and synthetic default-argument bridge; the filter arrived as a separate overload, not an
+  inserted parameter. Unlike 0.2.0, this release therefore does **not** force a lockstep
+  `:ferry-work` bump — the published `ferry-work:0.2.0` keeps linking and working. It cannot
+  *pass* a filter (its worker has no input key for one), so background filtered downloads need a
+  future `:ferry-work` release; that is a missing feature, not a break.
+
 ## 0.2.0
 
 `:ferry` is now a Kotlin Multiplatform library (JVM + iOS), published as `dev.thuat:ferry` with

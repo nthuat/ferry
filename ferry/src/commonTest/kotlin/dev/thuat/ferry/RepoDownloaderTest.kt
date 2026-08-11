@@ -1600,4 +1600,274 @@ class RepoDownloaderTest {
             "must not sum a nested id's own staged bytes into the prefix id's count",
         )
     }
+
+    // ---- file filter: selection (spec tests 1, 2, 3, 13) ----
+
+    @Test
+    fun `a filter downloads and commits only the matching subset`() {
+        val files = listOf(
+            remote("model-Q4_K_M.gguf", weightsBody.length.toLong(), shaOf(weightsBody)),
+            remote("model-Q8_0.gguf", configBody.length.toLong()),
+        )
+        queue.enqueue(body = weightsBody)
+
+        val dir = await { downloaderFor(files).download("o/m", root, Regex("Q4_K_M")) }.getOrThrow()
+
+        assertEquals(weightsBody, readText(dir / "model-Q4_K_M.gguf"))
+        assertFalse(fs.exists(dir / "model-Q8_0.gguf"))
+        assertEquals(1, queue.requests.size)
+    }
+
+    @Test
+    fun `a filter matching nothing fails - commits nothing - makes no file request`() {
+        val files = listOf(remote("model-Q8_0.gguf", 10L))
+
+        val result = await { downloaderFor(files).download("o/m", root, Regex("Q4_K_M")) }
+
+        assertTrue(result.exceptionOrNull()!!.message!!.contains("no files matched the filter"))
+        assertFalse(fs.exists(root / "o/m"))
+        assertTrue(queue.requests.isEmpty())
+    }
+
+    @Test
+    fun `space preflight sizes only the filtered subset`() {
+        // Whole repo (1_000_000 + weights) cannot fit in freeBytes; the selected file alone can.
+        val files = listOf(
+            remote("model-Q4_K_M.gguf", weightsBody.length.toLong(), shaOf(weightsBody)),
+            remote("huge-Q8_0.gguf", 1_000_000L),
+        )
+        queue.enqueue(body = weightsBody)
+
+        val dir = await {
+            downloaderFor(files, freeBytes = weightsBody.length.toLong())
+                .download("o/m", root, Regex("Q4_K_M"))
+        }.getOrThrow()
+
+        assertEquals(weightsBody, readText(dir / "model-Q4_K_M.gguf"))
+    }
+
+    @Test
+    fun `progress numbers each file within the filtered subset - not the manifest`() {
+        val files = listOf(
+            remote("a-Q4_K_M.gguf", configBody.length.toLong()),
+            remote("b-Q8_0.gguf", 10L),
+            remote("c-Q4_K_M.gguf", weightsBody.length.toLong()),
+        )
+        queue.enqueue(body = configBody)
+        queue.enqueue(body = weightsBody)
+        val events = mutableListOf<RepoProgress>()
+
+        await {
+            downloaderFor(files).download("o/m", root, Regex("Q4_K_M")) { events += it }
+        }.getOrThrow()
+
+        val downloading = events.filterIsInstance<RepoProgress.Downloading>()
+        assertEquals(setOf(0, 1), downloading.map { it.fileIndex }.toSet())
+        assertTrue(downloading.all { it.fileCount == 2 })
+    }
+
+    // ---- file filter: filter-keyed staging (spec tests 4, 8, 12; pinned filterKey) ----
+
+    /**
+     * Pins filterKey's output for a known (pattern, options) pair — sha256 of "6:Q4_K_M" (the
+     * canonicalIdentity of Regex("Q4_K_M") with no options: 6 is pattern.length, not a typo).
+     * The staging directory name is derived state: a refactor of canonicalIdentity that quietly
+     * changes this hex silently abandons every already-staged byte rather than failing.
+     */
+    @Test
+    fun `a filter's staging directory lands at the pinned filter key`() {
+        val files = listOf(remote("model-Q4_K_M.gguf", 100L))
+        queue.enqueue(status = HttpStatusCode.InternalServerError)
+
+        await { downloaderFor(files).download("o/m", root, Regex("Q4_K_M")) }
+
+        val keyed = root / ".staging" / "o" /
+            "m.d-84e8a49358769738436631f34724972c215ac5cf8a6e3019b642826553a316ce"
+        assertTrue(fs.metadataOrNull(keyed)?.isDirectory == true)
+    }
+
+    @Test
+    fun `an equal filter built from a fresh Regex instance resumes the same staging`() {
+        val files = listOf(remote("model-Q4_K_M.gguf", weightsBody.length.toLong(), shaOf(weightsBody)))
+        writeText(
+            root / ".staging" / "o" /
+                "m.d-84e8a49358769738436631f34724972c215ac5cf8a6e3019b642826553a316ce" /
+                "model-Q4_K_M.gguf",
+            weightsBody,
+        )
+
+        val dir = await { downloaderFor(files).download("o/m", root, Regex("Q4_K_M")) }.getOrThrow()
+
+        assertEquals(weightsBody, readText(dir / "model-Q4_K_M.gguf"))
+        assertTrue(queue.requests.isEmpty())
+    }
+
+    @Test
+    fun `a different filter stages independently and the first filter's bytes survive to be resumed`() {
+        val files = listOf(
+            remote("model-Q4_K_M.gguf", weightsBody.length.toLong(), shaOf(weightsBody)),
+            remote("model-Q8_0.gguf", configBody.length.toLong(), shaOf(configBody)),
+        )
+        // First filter's progress: a satisfied bare file, staged by hand in Q4_K_M's own directory.
+        val stagedA = root / ".staging" / "o" /
+            "m.d-84e8a49358769738436631f34724972c215ac5cf8a6e3019b642826553a316ce" /
+            "model-Q4_K_M.gguf"
+        writeText(stagedA, weightsBody)
+
+        // Second filter's attempt fails mid-flight — its staging is its own, not Q4_K_M's.
+        queue.enqueue(status = HttpStatusCode.InternalServerError)
+        val second = await { downloaderFor(files).download("o/m", root, Regex("Q8_0")) }
+        assertTrue(second.isFailure)
+        assertEquals(weightsBody, readText(stagedA))
+
+        // A later Q4_K_M call resumes the surviving bytes: no new request needed.
+        val requestsBefore = queue.requests.size
+        val dir = await { downloaderFor(files).download("o/m", root, Regex("Q4_K_M")) }.getOrThrow()
+        assertEquals(weightsBody, readText(dir / "model-Q4_K_M.gguf"))
+        assertEquals(requestsBefore, queue.requests.size)
+    }
+
+    @Test
+    fun `bytes staged by a pre-filter ferry are resumed by an unfiltered call`() {
+        // A pre-filter ferry staged at exactly `<id>.d` — the path an unfiltered call resolves.
+        val files = listOf(remote("model.bin", weightsBody.length.toLong(), shaOf(weightsBody)))
+        writeText(root / ".staging" / "o" / "m.d" / "model.bin", weightsBody)
+
+        val dir = await { downloaderFor(files).download("o/m", root) }.getOrThrow()
+
+        assertEquals(weightsBody, readText(dir / "model.bin"))
+        assertTrue(queue.requests.isEmpty())
+    }
+
+    // ---- file filter: commit identity (spec tests 5, 6, 7, 11 + the unfiltered-reverse case) ----
+
+    @Test
+    fun `a different filter after commit refuses with no network request at all`() {
+        val files = listOf(remote("model-Q4_K_M.gguf", weightsBody.length.toLong(), shaOf(weightsBody)))
+        queue.enqueue(body = weightsBody)
+        await { downloaderFor(files).download("o/m", root, Regex("Q4_K_M")) }.getOrThrow()
+
+        // A hub that must not be consulted: if the gate runs after the manifest fetch, the
+        // failure message becomes this one instead of the filter refusal below.
+        val silentHub = object : ModelHub {
+            override suspend fun manifest(repoId: String): Result<RepoManifest> =
+                Result.failure(okio.IOException("manifest must not be fetched"))
+        }
+        val second = RepoDownloader(
+            repo = silentHub,
+            downloader = ResumableDownloader(queue.client, fs, UnconfinedTestDispatcher()),
+            spaceCheck = SpaceCheck(probe = { Long.MAX_VALUE }, headroomBytes = 0L),
+            fileSystem = fs,
+            dispatcher = UnconfinedTestDispatcher(),
+        )
+        val requestsBefore = queue.requests.size
+
+        val result = await { second.download("o/m", root, Regex("Q5_K_M")) }
+
+        assertTrue(result.exceptionOrNull()!!.message!!.contains("different file filter"))
+        assertEquals(requestsBefore, queue.requests.size)
+        assertEquals(weightsBody, readText(root / "o/m" / "model-Q4_K_M.gguf"))
+    }
+
+    @Test
+    fun `a filtered call against a target committed unfiltered is refused - not returned as a cache hit`() {
+        val files = listOf(
+            remote("model-Q4_K_M.gguf", weightsBody.length.toLong(), shaOf(weightsBody)),
+            remote("model-Q8_0.gguf", configBody.length.toLong(), shaOf(configBody)),
+        )
+        queue.enqueue(body = weightsBody)
+        queue.enqueue(body = configBody)
+        await { downloaderFor(files).download("o/m", root) }.getOrThrow()
+
+        val result = await { downloaderFor(files).download("o/m", root, Regex("Q4_K_M")) }
+
+        assertTrue(result.exceptionOrNull()!!.message!!.contains("different file filter"))
+        assertEquals(weightsBody, readText(root / "o/m" / "model-Q4_K_M.gguf"))
+        assertEquals(configBody, readText(root / "o/m" / "model-Q8_0.gguf"))
+    }
+
+    @Test
+    fun `an unfiltered call against a target committed filtered is refused rather than replacing it`() {
+        val files = listOf(
+            remote("model-Q4_K_M.gguf", weightsBody.length.toLong(), shaOf(weightsBody)),
+            remote("model-Q8_0.gguf", configBody.length.toLong(), shaOf(configBody)),
+        )
+        queue.enqueue(body = weightsBody)
+        await { downloaderFor(files).download("o/m", root, Regex("Q4_K_M")) }.getOrThrow()
+
+        val result = await { downloaderFor(files).download("o/m", root) }
+
+        assertTrue(result.exceptionOrNull()!!.message!!.contains("different file filter"))
+        assertEquals(weightsBody, readText(root / "o/m" / "model-Q4_K_M.gguf"))
+    }
+
+    @Test
+    fun `filters differing only in RegexOption do not satisfy each other's commit gate`() {
+        val files = listOf(remote("model-q4_k_m.gguf", weightsBody.length.toLong(), shaOf(weightsBody)))
+        queue.enqueue(body = weightsBody)
+        await { downloaderFor(files).download("o/m", root, Regex("q4_k_m")) }.getOrThrow()
+
+        val result = await {
+            downloaderFor(files).download("o/m", root, Regex("q4_k_m", RegexOption.IGNORE_CASE))
+        }
+
+        assertTrue(result.exceptionOrNull()!!.message!!.contains("different file filter"))
+    }
+
+    @Test
+    fun `a marker written by a pre-filter ferry stays a cache hit for an unfiltered call`() {
+        // Written by hand: no pre-filter ferry is available to produce it. Exactly repoId,
+        // no trailing newline — byte for byte what every version of ferry has ever written.
+        val files = listOf(remote("config.json", configBody.length.toLong()))
+        writeText(root / "o/m" / "config.json", configBody)
+        writeText(root / "o/m" / ".ferry", "o/m")
+
+        val dir = await { downloaderFor(files).download("o/m", root) }.getOrThrow()
+
+        assertEquals(root / "o" / "m", dir)
+        assertTrue(queue.requests.isEmpty())
+    }
+
+    // ---- file filter: abandonStaging / stagedBytes sweep (spec tests 9, 10) ----
+
+    private val keyA = "84e8a49358769738436631f34724972c215ac5cf8a6e3019b642826553a316ce"
+    private val keyB = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    @Test
+    fun `abandonStaging removes the unfiltered and every filter-keyed staging for the id - and no other id's`() {
+        writeText(root / ".staging" / "o" / "m.d" / "plain.bin", "plain")
+        writeText(root / ".staging" / "o" / "m.d-$keyA" / "a.bin", "aa")
+        writeText(root / ".staging" / "o" / "m.d-$keyB" / "b.bin", "bb")
+        // A different repo id whose staging directory is a naive-prefix trap: id "m.d-x" under
+        // "o" stages at "o/m.d-x.d", which starts with "m.d-" but is not 64 hex — must survive.
+        writeText(root / ".staging" / "o" / "m.d-x.d" / "other.bin", "other")
+
+        await { downloaderFor(emptyList()).abandonStaging("o/m", root) }.getOrThrow()
+
+        assertFalse(fs.exists(root / ".staging" / "o" / "m.d"))
+        assertFalse(fs.exists(root / ".staging" / "o" / "m.d-$keyA"))
+        assertFalse(fs.exists(root / ".staging" / "o" / "m.d-$keyB"))
+        assertEquals("other", readText(root / ".staging" / "o" / "m.d-x.d" / "other.bin"))
+    }
+
+    @Test
+    fun `stagedBytes sums across the unfiltered and every filter-keyed staging directory`() {
+        // Reusable shapes only: a bare file in the unfiltered dir, a validated .part in a keyed
+        // one, an unvalidated .part (counts zero) in another.
+        writeText(root / ".staging" / "o" / "m.d" / "plain.bin", "12345")
+        writeText(root / ".staging" / "o" / "m.d-$keyA" / "a.bin.part", "1234567")
+        writeText(root / ".staging" / "o" / "m.d-$keyA" / "a.bin.validator", "etag")
+        writeText(root / ".staging" / "o" / "m.d-$keyB" / "b.bin.part", "123")
+
+        val bytes = await { downloaderFor(emptyList()).stagedBytes("o/m", root) }
+
+        assertEquals(5L + 7L, bytes)
+    }
+
+    @Test
+    fun `stagedBytes does not count a different repo id shaped like a filter-keyed sibling`() {
+        writeText(root / ".staging" / "o" / "m.d-x.d" / "other.bin", "other")
+
+        assertEquals(0L, await { downloaderFor(emptyList()).stagedBytes("o/m", root) })
+    }
 }

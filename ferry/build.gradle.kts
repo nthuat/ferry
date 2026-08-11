@@ -8,7 +8,7 @@ plugins {
 // 0.x, deliberately: RepoProgress is sealed and pause is future work (README's "0.x" note) — a
 // Paused case would be source-breaking for every exhaustive `when` once this hits 1.0.0. Free at 0.x.
 group = "dev.thuat"
-version = "0.2.0"
+version = "0.3.0"
 
 kotlin {
     jvmToolchain(17)
