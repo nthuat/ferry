@@ -598,13 +598,14 @@ class RepoDownloader(
      *
      * No staging present for [repoId] is success, not failure: the caller asked for a state — this
      * repo's staging reclaimed — and that state already holds.
+     *
+     * Sweeps every filter's staging directory for [repoId], unfiltered and keyed alike — see
+     * [stagingDirsFor] — so "wipes all staging for this repo id" is now literally true.
      */
     suspend fun abandonStaging(repoId: String, into: Path): Result<Unit> = withContext(dispatcher) {
         try {
-            val stagingRoot = into / ".staging"
-            val stagingDir = stagingDirFor(stagingRoot, repoId, "")
-            if (fileSystem.exists(stagingDir)) {
-                fileSystem.deleteRecursively(stagingDir)
+            stagingDirsFor(into / ".staging", repoId).forEach { dir ->
+                fileSystem.deleteRecursively(dir)
             }
             Result.success(Unit)
         } catch (e: IOException) {
@@ -666,35 +667,40 @@ class RepoDownloader(
      * here and then discarded there, without ever being resumed. Not a gap this method could close
      * without a manifest to check against; stated here rather than left for the list above to imply
      * a completeness it cannot have.
+     *
+     * Sums across every filter's staging directory for [repoId], unfiltered and keyed alike — see
+     * [stagingDirsFor] — so for a repo id with two filters staged this is their union, not what one
+     * particular filtered [download] would actually reuse; one more way this is a hint, not a
+     * promise.
      */
     suspend fun stagedBytes(repoId: String, into: Path): Long = withContext(dispatcher) {
         try {
-            val stagingDir = stagingDirFor(into / ".staging", repoId, "")
-            val marker = stagingDir / MARKER_FILE
-            if (fileSystem.metadataOrNull(stagingDir)?.isDirectory != true) {
-                0L
-            } else {
-                fileSystem.listRecursively(stagingDir)
-                    .filter { fileSystem.metadataOrNull(it)?.isRegularFile == true && it != marker }
-                    .sumOf { staged ->
-                        when {
-                            staged.name.endsWith(".validator") -> 0L
-                            staged.name.endsWith(".part") -> {
-                                val validator =
-                                    staged.parent!! / "${staged.name.removeSuffix(".part")}.validator"
-                                if (fileSystem.metadataOrNull(validator)?.isRegularFile == true) {
-                                    fileSystem.sizeOf(staged)
-                                } else {
-                                    0L
-                                }
-                            }
-                            else -> fileSystem.sizeOf(staged)
-                        }
-                    }
-            }
+            stagingDirsFor(into / ".staging", repoId).sumOf { stagedBytesIn(it) }
         } catch (e: IOException) {
             0L
         }
+    }
+
+    private fun stagedBytesIn(stagingDir: Path): Long {
+        val marker = stagingDir / MARKER_FILE
+        if (fileSystem.metadataOrNull(stagingDir)?.isDirectory != true) return 0L
+        return fileSystem.listRecursively(stagingDir)
+            .filter { fileSystem.metadataOrNull(it)?.isRegularFile == true && it != marker }
+            .sumOf { staged ->
+                when {
+                    staged.name.endsWith(".validator") -> 0L
+                    staged.name.endsWith(".part") -> {
+                        val validator =
+                            staged.parent!! / "${staged.name.removeSuffix(".part")}.validator"
+                        if (fileSystem.metadataOrNull(validator)?.isRegularFile == true) {
+                            fileSystem.sizeOf(staged)
+                        } else {
+                            0L
+                        }
+                    }
+                    else -> fileSystem.sizeOf(staged)
+                }
+            }
     }
 
     /**
@@ -946,6 +952,38 @@ class RepoDownloader(
         // ((stagingRoot / "owner/").normalized() == (stagingRoot / "owner").normalized()), and must
         // name the same staging directory too.
         return resolveInside(stagingRoot, "${repoId.trimEnd('/')}$suffix")
+    }
+
+    /**
+     * Every staging directory belonging to [repoId] under [stagingRoot]: the unfiltered one and
+     * one per filter — `<last>.d` and `<last>.d-<64 lowercase hex>` siblings, where `<last>` is
+     * [repoId]'s trimmed final segment.
+     *
+     * The exactly-64-hex requirement is load-bearing, not decoration: a bare
+     * `startsWith("<last>.d-")` would match a *different* repo id's staging — an id literally
+     * named `m.d-x` stages at `m.d-x.d`, which starts with `m.d-`. Requiring the remainder to be
+     * exactly 64 hex characters excludes that for every possible id: a real staging directory
+     * name always ends in [STAGING_SUFFIX] (".d"), and '.' is not a hex character, so no other
+     * id's staging directory can ever satisfy the test. Unlike [stagingDirFor]'s documented
+     * deliberately-constructed-collision residual, this one has no residual at all.
+     *
+     * Resolves through [stagingDirFor] first so a hostile or malformed [repoId] is rejected
+     * exactly as everywhere else, before any listing happens.
+     */
+    private fun stagingDirsFor(stagingRoot: Path, repoId: String): List<Path> {
+        val unfiltered = stagingDirFor(stagingRoot, repoId, "")
+        val parent = unfiltered.parent ?: return emptyList()
+        val base = unfiltered.name
+        return (fileSystem.listOrNull(parent) ?: emptyList()).filter { entry ->
+            entry.name == base || isFilterKeyedSibling(entry.name, base)
+        }
+    }
+
+    /** Whether [name] is `[base]-` followed by exactly 64 lowercase hex characters. */
+    private fun isFilterKeyedSibling(name: String, base: String): Boolean {
+        if (!name.startsWith("$base-")) return false
+        val hex = name.substring(base.length + 1)
+        return hex.length == 64 && hex.all { it in '0'..'9' || it in 'a'..'f' }
     }
 
     /**

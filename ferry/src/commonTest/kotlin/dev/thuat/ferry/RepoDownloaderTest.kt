@@ -1827,4 +1827,47 @@ class RepoDownloaderTest {
         assertEquals(root / "o" / "m", dir)
         assertTrue(queue.requests.isEmpty())
     }
+
+    // ---- file filter: abandonStaging / stagedBytes sweep (spec tests 9, 10) ----
+
+    private val keyA = "84e8a49358769738436631f34724972c215ac5cf8a6e3019b642826553a316ce"
+    private val keyB = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    @Test
+    fun `abandonStaging removes the unfiltered and every filter-keyed staging for the id - and no other id's`() {
+        writeText(root / ".staging" / "o" / "m.d" / "plain.bin", "plain")
+        writeText(root / ".staging" / "o" / "m.d-$keyA" / "a.bin", "aa")
+        writeText(root / ".staging" / "o" / "m.d-$keyB" / "b.bin", "bb")
+        // A different repo id whose staging directory is a naive-prefix trap: id "m.d-x" under
+        // "o" stages at "o/m.d-x.d", which starts with "m.d-" but is not 64 hex — must survive.
+        writeText(root / ".staging" / "o" / "m.d-x.d" / "other.bin", "other")
+
+        await { downloaderFor(emptyList()).abandonStaging("o/m", root) }.getOrThrow()
+
+        assertFalse(fs.exists(root / ".staging" / "o" / "m.d"))
+        assertFalse(fs.exists(root / ".staging" / "o" / "m.d-$keyA"))
+        assertFalse(fs.exists(root / ".staging" / "o" / "m.d-$keyB"))
+        assertEquals("other", readText(root / ".staging" / "o" / "m.d-x.d" / "other.bin"))
+    }
+
+    @Test
+    fun `stagedBytes sums across the unfiltered and every filter-keyed staging directory`() {
+        // Reusable shapes only: a bare file in the unfiltered dir, a validated .part in a keyed
+        // one, an unvalidated .part (counts zero) in another.
+        writeText(root / ".staging" / "o" / "m.d" / "plain.bin", "12345")
+        writeText(root / ".staging" / "o" / "m.d-$keyA" / "a.bin.part", "1234567")
+        writeText(root / ".staging" / "o" / "m.d-$keyA" / "a.bin.validator", "etag")
+        writeText(root / ".staging" / "o" / "m.d-$keyB" / "b.bin.part", "123")
+
+        val bytes = await { downloaderFor(emptyList()).stagedBytes("o/m", root) }
+
+        assertEquals(5L + 7L, bytes)
+    }
+
+    @Test
+    fun `stagedBytes does not count a different repo id shaped like a filter-keyed sibling`() {
+        writeText(root / ".staging" / "o" / "m.d-x.d" / "other.bin", "other")
+
+        assertEquals(0L, await { downloaderFor(emptyList()).stagedBytes("o/m", root) })
+    }
 }
