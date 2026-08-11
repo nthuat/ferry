@@ -236,6 +236,29 @@ class RepoDownloader(
                 throw IOException("repo id collides with the marker directory: $repoId")
             }
 
+            // Filter-identity gate, before the manifest fetch: it needs only repoId, into and the
+            // filter's identity, so a mismatch knowable from one marker read is refused before any
+            // network request and before the cache-hit check below can call a directory committed
+            // under a broader selection a hit for a narrower one. Fires only on a marker that is
+            // recognisably this repo id with a different filter identity: an absent marker or a
+            // foreign id falls straight through to today's behavior — the cache-hit check may still
+            // hit, and the commit-time gate below still produces today's foreign-directory refusal.
+            // The prefix test chooses the error *message*, never the verdict: acceptance anywhere
+            // in this file is whole-string equality against markerContent, which a pathological
+            // repo id cannot forge.
+            val marker = target / MARKER_FILE
+            if (fileSystem.metadataOrNull(marker)?.isRegularFile == true) {
+                val content = fileSystem.read(marker) { readUtf8() }
+                if (content != markerContent(repoId, key) &&
+                    (content == repoId || content.startsWith("$repoId\n"))
+                ) {
+                    throw IOException(
+                        "$target was committed by Ferry under '$repoId' with a different file " +
+                            "filter; refusing to replace it — remove the directory to retry",
+                    )
+                }
+            }
+
             // Inside the try, not before it: `repo` is a third-party ModelHub (its own KDoc), and
             // nothing stops an implementation from throwing instead of returning Result.failure — a
             // call site before this try let that throw escape download()'s own Result<Path> contract
@@ -421,14 +444,13 @@ class RepoDownloader(
             // ownership of a directory — Ferry's own write always lands last, overwriting it. A
             // manifest entry named ".ferry" *in a subdirectory* is not shadowed by this at all and
             // downloads as ordinary content: this write only ever touches stagingDir's own root.
-            fileSystem.write(stagingDir / MARKER_FILE) { writeUtf8(repoId) }
+            fileSystem.write(stagingDir / MARKER_FILE) { writeUtf8(markerContent(repoId, key)) }
 
             if (fileSystem.exists(target)) {
                 // An absent marker is a refusal, not an exception: something Ferry did not write is
                 // sitting here, and that is precisely what must not be deleted to make room.
-                val marker = target / MARKER_FILE
                 val markerIsFile = fileSystem.metadataOrNull(marker)?.isRegularFile == true
-                if (!markerIsFile || fileSystem.read(marker) { readUtf8() } != repoId) {
+                if (!markerIsFile || fileSystem.read(marker) { readUtf8() } != markerContent(repoId, key)) {
                     throw IOException(
                         "$target was not committed by Ferry under '$repoId'; refusing to replace " +
                             "it — remove the directory to retry",
@@ -859,6 +881,21 @@ class RepoDownloader(
      */
     private fun filterKey(filter: Regex?): String =
         filter?.let { canonicalIdentity(it).encodeUtf8().sha256().hex() } ?: ""
+
+    /**
+     * What `target/[MARKER_FILE]` contains — written, compared whole-string, **never parsed**.
+     *
+     * The unfiltered writer emits exactly [repoId], byte for byte what every version of ferry has
+     * ever written, with no trailing separator: a directory committed by a pre-filter ferry reads
+     * back equal to what an unfiltered call expects, so it stays a valid cache hit and a valid
+     * commit target with no migration. The filtered writer emits [repoId], one '\n', and the 64
+     * lowercase hex characters of [filterKey]. Both [repoId] and a Regex pattern may legally
+     * contain '\n', which is why no field is ever extracted back out of this string — the
+     * accept/reject decision everywhere is whole-string equality, and the pattern's own newlines
+     * never reach the file at all because only its hash does.
+     */
+    private fun markerContent(repoId: String, filterKey: String): String =
+        if (filterKey.isEmpty()) repoId else "$repoId\n$filterKey"
 
     /**
      * Where [repoId] stages under [stagingRoot] (`into/.staging`).

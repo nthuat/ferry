@@ -1738,4 +1738,93 @@ class RepoDownloaderTest {
         assertEquals(weightsBody, readText(dir / "model.bin"))
         assertTrue(queue.requests.isEmpty())
     }
+
+    // ---- file filter: commit identity (spec tests 5, 6, 7, 11 + the unfiltered-reverse case) ----
+
+    @Test
+    fun `a different filter after commit refuses with no network request at all`() {
+        val files = listOf(remote("model-Q4_K_M.gguf", weightsBody.length.toLong(), shaOf(weightsBody)))
+        queue.enqueue(body = weightsBody)
+        await { downloaderFor(files).download("o/m", root, Regex("Q4_K_M")) }.getOrThrow()
+
+        // A hub that must not be consulted: if the gate runs after the manifest fetch, the
+        // failure message becomes this one instead of the filter refusal below.
+        val silentHub = object : ModelHub {
+            override suspend fun manifest(repoId: String): Result<RepoManifest> =
+                Result.failure(okio.IOException("manifest must not be fetched"))
+        }
+        val second = RepoDownloader(
+            repo = silentHub,
+            downloader = ResumableDownloader(queue.client, fs, UnconfinedTestDispatcher()),
+            spaceCheck = SpaceCheck(probe = { Long.MAX_VALUE }, headroomBytes = 0L),
+            fileSystem = fs,
+            dispatcher = UnconfinedTestDispatcher(),
+        )
+        val requestsBefore = queue.requests.size
+
+        val result = await { second.download("o/m", root, Regex("Q5_K_M")) }
+
+        assertTrue(result.exceptionOrNull()!!.message!!.contains("different file filter"))
+        assertEquals(requestsBefore, queue.requests.size)
+        assertEquals(weightsBody, readText(root / "o/m" / "model-Q4_K_M.gguf"))
+    }
+
+    @Test
+    fun `a filtered call against a target committed unfiltered is refused - not returned as a cache hit`() {
+        val files = listOf(
+            remote("model-Q4_K_M.gguf", weightsBody.length.toLong(), shaOf(weightsBody)),
+            remote("model-Q8_0.gguf", configBody.length.toLong(), shaOf(configBody)),
+        )
+        queue.enqueue(body = weightsBody)
+        queue.enqueue(body = configBody)
+        await { downloaderFor(files).download("o/m", root) }.getOrThrow()
+
+        val result = await { downloaderFor(files).download("o/m", root, Regex("Q4_K_M")) }
+
+        assertTrue(result.exceptionOrNull()!!.message!!.contains("different file filter"))
+        assertEquals(weightsBody, readText(root / "o/m" / "model-Q4_K_M.gguf"))
+        assertEquals(configBody, readText(root / "o/m" / "model-Q8_0.gguf"))
+    }
+
+    @Test
+    fun `an unfiltered call against a target committed filtered is refused rather than replacing it`() {
+        val files = listOf(
+            remote("model-Q4_K_M.gguf", weightsBody.length.toLong(), shaOf(weightsBody)),
+            remote("model-Q8_0.gguf", configBody.length.toLong(), shaOf(configBody)),
+        )
+        queue.enqueue(body = weightsBody)
+        await { downloaderFor(files).download("o/m", root, Regex("Q4_K_M")) }.getOrThrow()
+
+        val result = await { downloaderFor(files).download("o/m", root) }
+
+        assertTrue(result.exceptionOrNull()!!.message!!.contains("different file filter"))
+        assertEquals(weightsBody, readText(root / "o/m" / "model-Q4_K_M.gguf"))
+    }
+
+    @Test
+    fun `filters differing only in RegexOption do not satisfy each other's commit gate`() {
+        val files = listOf(remote("model-q4_k_m.gguf", weightsBody.length.toLong(), shaOf(weightsBody)))
+        queue.enqueue(body = weightsBody)
+        await { downloaderFor(files).download("o/m", root, Regex("q4_k_m")) }.getOrThrow()
+
+        val result = await {
+            downloaderFor(files).download("o/m", root, Regex("q4_k_m", RegexOption.IGNORE_CASE))
+        }
+
+        assertTrue(result.exceptionOrNull()!!.message!!.contains("different file filter"))
+    }
+
+    @Test
+    fun `a marker written by a pre-filter ferry stays a cache hit for an unfiltered call`() {
+        // Written by hand: no pre-filter ferry is available to produce it. Exactly repoId,
+        // no trailing newline — byte for byte what every version of ferry has ever written.
+        val files = listOf(remote("config.json", configBody.length.toLong()))
+        writeText(root / "o/m" / "config.json", configBody)
+        writeText(root / "o/m" / ".ferry", "o/m")
+
+        val dir = await { downloaderFor(files).download("o/m", root) }.getOrThrow()
+
+        assertEquals(root / "o" / "m", dir)
+        assertTrue(queue.requests.isEmpty())
+    }
 }
