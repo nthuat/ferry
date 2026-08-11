@@ -55,6 +55,14 @@ Ferry.modelScope().download("Qwen/Qwen2.5-0.5B-Instruct", dir)
 Ferry.ollama().download("qwen2.5:0.5b", dir)
 ```
 
+A repo with many quantisation variants doesn't force downloading all of them — `fileFilter`
+selects a subset by path, and every guarantee (space preflight, resume, verification, atomic
+commit) applies to just that subset:
+
+```kotlin
+ferry.download("bartowski/Qwen2.5-1.5B-Instruct-GGUF", dir, fileFilter = Regex("Q4_K_M"))
+```
+
 Each takes a Ktor `HttpClient` if you have one. Pass it if you do: every request Ferry makes then
 travels through your interceptors, your timeouts and your proxy config. Already have an
 `OkHttpClient`? Wrap it rather than build a fresh one:
