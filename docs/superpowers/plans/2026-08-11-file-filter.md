@@ -25,9 +25,9 @@
 
 | Regex | canonicalIdentity | filterKey (sha256 hex) |
 |---|---|---|
-| `Regex("Q4_K_M")` | `7:Q4_K_M` | `0902cae03e373757a463b59843480d53803b68d8a961592e97191bc575d91466` |
-| `Regex("q4_k_m")` | `7:q4_k_m` | `25e60699503b91ff25d607871d97c88805be57c10fdd81b8d0580e9d12074b06` |
-| `Regex("q4_k_m", RegexOption.IGNORE_CASE)` | `7:q4_k_mIGNORE_CASE` | `655102996b6827fb7794b12865dc19786868f448684d04415f5cecbb879e57d0` |
+| `Regex("Q4_K_M")` | `6:Q4_K_M` | `84e8a49358769738436631f34724972c215ac5cf8a6e3019b642826553a316ce` |
+| `Regex("q4_k_m")` | `6:q4_k_m` | `d6b5133a80b0fc611180cb80dc99d6f106cf4eb1cd52c5f22a26e6ae0827d0f5` |
+| `Regex("q4_k_m", RegexOption.IGNORE_CASE)` | `6:q4_k_mIGNORE_CASE` | `e159c0f9b78e39554f1d236bb4cd7ec4d648fd0fbb25659ae3b20c1b33bbc3e7` |
 
 ---
 
@@ -266,7 +266,7 @@ Expected: BUILD SUCCESSFUL, all tests pass (new four included).
     // ---- file filter: filter-keyed staging (spec tests 4, 8, 12; pinned filterKey) ----
 
     /**
-     * Pins filterKey's output for a known (pattern, options) pair — sha256 of "7:Q4_K_M".
+     * Pins filterKey's output for a known (pattern, options) pair — sha256 of "6:Q4_K_M".
      * The staging directory name is derived state: a refactor of canonicalIdentity that quietly
      * changes this hex silently abandons every already-staged byte rather than failing.
      */
@@ -278,7 +278,7 @@ Expected: BUILD SUCCESSFUL, all tests pass (new four included).
         await { downloaderFor(files).download("o/m", root, Regex("Q4_K_M")) }
 
         val keyed = root / ".staging" / "o" /
-            "m.d-0902cae03e373757a463b59843480d53803b68d8a961592e97191bc575d91466"
+            "m.d-84e8a49358769738436631f34724972c215ac5cf8a6e3019b642826553a316ce"
         assertTrue(fs.metadataOrNull(keyed)?.isDirectory == true)
     }
 
@@ -287,7 +287,7 @@ Expected: BUILD SUCCESSFUL, all tests pass (new four included).
         val files = listOf(remote("model-Q4_K_M.gguf", weightsBody.length.toLong(), shaOf(weightsBody)))
         writeText(
             root / ".staging" / "o" /
-                "m.d-0902cae03e373757a463b59843480d53803b68d8a961592e97191bc575d91466" /
+                "m.d-84e8a49358769738436631f34724972c215ac5cf8a6e3019b642826553a316ce" /
                 "model-Q4_K_M.gguf",
             weightsBody,
         )
@@ -306,7 +306,7 @@ Expected: BUILD SUCCESSFUL, all tests pass (new four included).
         )
         // First filter's progress: a satisfied bare file, staged by hand in Q4_K_M's own directory.
         val stagedA = root / ".staging" / "o" /
-            "m.d-0902cae03e373757a463b59843480d53803b68d8a961592e97191bc575d91466" /
+            "m.d-84e8a49358769738436631f34724972c215ac5cf8a6e3019b642826553a316ce" /
             "model-Q4_K_M.gguf"
         writeText(stagedA, weightsBody)
 
@@ -559,7 +559,7 @@ git commit -m "feat: commit marker carries filter identity - gate refuses a mism
 ```kotlin
     // ---- file filter: abandonStaging / stagedBytes sweep (spec tests 9, 10) ----
 
-    private val keyA = "0902cae03e373757a463b59843480d53803b68d8a961592e97191bc575d91466"
+    private val keyA = "84e8a49358769738436631f34724972c215ac5cf8a6e3019b642826553a316ce"
     private val keyB = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
     @Test
