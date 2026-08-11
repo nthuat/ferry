@@ -14,14 +14,14 @@ a shared module) declares one coordinate and Gradle resolves the target-specific
 whichever platform it's building:
 
 ```kotlin
-implementation("dev.thuat:ferry:0.2.0")
+implementation("dev.thuat:ferry:0.3.0")
 ```
 
 A JVM-only or Android-only consumer declares the exact same coordinate — Gradle resolves it to
 `ferry-jvm` under the hood, nothing platform-specific to spell out:
 
 ```kotlin
-implementation("dev.thuat:ferry:0.2.0")
+implementation("dev.thuat:ferry:0.3.0")
 // Optional and additive, JVM/Android only. Only if you want WorkManager backgrounding:
 implementation("dev.thuat:ferry-work:0.2.0")
 ```
