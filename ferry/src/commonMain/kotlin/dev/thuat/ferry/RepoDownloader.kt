@@ -151,7 +151,7 @@ class RepoDownloader(
      * Exists as a distinct overload, not a default on the filtered form, **solely for binary
      * compatibility**: the published dev.thuat:ferry-work:0.2.0 was compiled against this exact
      * JVM descriptor (`download(String, Path, Function1, Continuation)`) and its synthetic
-     * `download$default` bridge. Folding it into the 4-parameter function as `fileFilter: Regex? =
+     * default-argument bridge. Folding it into the 4-parameter function as `fileFilter: Regex? =
      * null` keeps every caller *compiling* but breaks every already-published caller at runtime
      * with NoSuchMethodError. See BinaryCompatTest in jvmTest, which pins this descriptor.
      */
@@ -164,16 +164,19 @@ class RepoDownloader(
     /**
      * Downloads [repoId] into a directory under [into] and returns it.
      *
-     * **Not safe to call concurrently for the same [repoId] and [into].** Both calls stage into the
-     * same scratch directory and write into it independently — interleaved writes to the same
-     * destination file are a corruption risk on their own. Whichever commits first renames staging
-     * onto `target`; if the other still holds open file descriptors into it, its writes follow the
-     * inode into what is now a committed repo. If the second call reaches its own commit afterward,
-     * `target`'s marker still names the same repo id, so the guard against replacing a directory
-     * this method did not write does not catch this either: the second call deletes the first's
-     * freshly committed repo and renames its own version over it. Serialising calls per repo id is
-     * the caller's responsibility; different repo ids are independent. See also [abandonStaging]'s
-     * own KDoc for the same hazard between `abandonStaging` and `download`.
+     * **Not safe to call concurrently for the same [repoId] and [into].** Two such calls sharing the
+     * same [fileFilter] stage into the same scratch directory and write into it independently —
+     * interleaved writes to the same destination file are a corruption risk on their own. Whichever
+     * commits first renames staging onto `target`; if the other still holds open file descriptors
+     * into it, its writes follow the inode into what is now a committed repo. If the second call
+     * reaches its own commit afterward, `target`'s marker still names the same repo id, so the guard
+     * against replacing a directory this method did not write does not catch this either: the second
+     * call deletes the first's freshly committed repo and renames its own version over it. A
+     * *different* [fileFilter] stages into its own sibling scratch directory instead of the same one
+     * — but both calls still race each other at the shared `target`, where the loser is refused by
+     * the commit-time filter-identity check (its marker no longer matches), not deleted. Serialising
+     * calls per repo id is the caller's responsibility; different repo ids are independent. See also
+     * [abandonStaging]'s own KDoc for the same hazard between `abandonStaging` and `download`.
      *
      * [fileFilter] selects the subset of the manifest to download: a file is selected when
      * `fileFilter.containsMatchIn(remoteFile.path)` — substring semantics against the
@@ -271,7 +274,7 @@ class RepoDownloader(
             }
 
             // An empty manifest is a listing that failed without saying so — a hub answering 200 with
-            // [], a revision that does not exist, a filter that matched nothing. Refused here because
+            // [], a revision that does not exist. Refused here because
             // every downstream check is written as "every file is correct", and every file of no files
             // is trivially correct: the cache check would call any directory that happened to exist a
             // hit and return it, and with nothing there the commit step would publish a repo containing

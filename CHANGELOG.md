@@ -20,7 +20,7 @@ ferry.download(repoId, into, fileFilter = Regex("Q4_K_M")) { progress -> ... }
   variants in place, or use a different `into` per variant.
 - **Additive, not breaking — and here is the mechanism, because 0.2.0's lesson was that the
   label alone is not enough:** the existing 3-argument `download` keeps its exact JVM descriptor
-  and synthetic `download$default` bridge; the filter arrived as a separate overload, not an
+  and synthetic default-argument bridge; the filter arrived as a separate overload, not an
   inserted parameter. Unlike 0.2.0, this release therefore does **not** force a lockstep
   `:ferry-work` bump — the published `ferry-work:0.2.0` keeps linking and working. It cannot
   *pass* a filter (its worker has no input key for one), so background filtered downloads need a
